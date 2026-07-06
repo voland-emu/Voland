@@ -1,8 +1,8 @@
 # Dumping Guide
 
-This guide covers how to obtain the files Vela requires from a Nintendo Switch you own. These steps require a Nintendo Switch that can run custom firmware. **This guide is for your own hardware only.**
+This guide covers how to obtain the files Voland requires from a Nintendo Switch you own. These steps require a Nintendo Switch that can run custom firmware. **This guide is for your own hardware only.**
 
-Vela does not endorse piracy. Do not use this guide to obtain files from hardware you do not own.
+Voland does not endorse piracy. Do not use this guide to obtain files from hardware you do not own.
 
 ---
 
@@ -73,9 +73,9 @@ Keys are saved to your microSD card at:
 
 Copy both files to your PC.
 
-### Provide to Vela
+### Provide to Voland
 
-When you first open Vela it will ask you to select your `prod.keys` file. Select it from wherever you saved it on your PC. Vela reads it in place - it is never uploaded or copied anywhere.
+When you first open Voland it will ask you to select your `prod.keys` file. Select it from wherever you saved it on your PC. Voland reads it in place - it is never uploaded or copied anywhere.
 
 ---
 
@@ -108,15 +108,15 @@ Use **nxdumptool** to dump games installed from the eShop.
 
 Dump updates and DLC separately using the same nxdumptool flow. Select "dump update NSP" or "dump DLC NSP" from the game's submenu.
 
-### Provide to Vela
+### Provide to Voland
 
-When you first open Vela it will ask you to select a games folder. Point it at the folder containing your XCI and NSP files. Vela reads them in place - they are never uploaded or copied into browser storage.
+When you first open Voland it will ask you to select a games folder. Point it at the folder containing your XCI and NSP files. Voland reads them in place - they are never uploaded or copied into browser storage.
 
 ---
 
 ## Step 5 - Dump firmware (optional)
 
-Most games run without real firmware - Vela's HLE layer implements the Switch OS services directly. Firmware is only needed for games that depend on specific system behavior that HLE does not yet cover.
+Most games run without real firmware - Voland's HLE layer implements the Switch OS services directly. Firmware is only needed for games that depend on specific system behavior that HLE does not yet cover.
 
 If you need firmware, use **Tegra Explorer** or **NXDumpFuse** to dump system firmware from your Switch's NAND. Instructions are on the [NH Switch Guide](https://switch.hacks.guide/).
 
@@ -130,7 +130,7 @@ If you need firmware, use **Tegra Explorer** or **NXDumpFuse** to dump system fi
 | NSP | eShop / installed dump | Base game, update, and DLC are separate files |
 | NRO | Homebrew | Runs without keys - useful for testing |
 
-Vela does not support NSZ or XCZ (compressed formats). Use [nsz](https://github.com/nicoboss/nsz) to decompress them to NSP/XCI before use.
+Voland does not support NSZ or XCZ (compressed formats). Use [nsz](https://github.com/nicoboss/nsz) to decompress them to NSP/XCI before use.
 
 ---
 
@@ -140,7 +140,7 @@ Vela does not support NSZ or XCZ (compressed formats). Use [nsz](https://github.
 Your keys may be outdated if your Switch firmware has been updated since you dumped them. Re-run Lockpick_RCM to get fresh keys.
 
 **Game fails to load**
-Ensure you are loading the base game NSP not the update NSP. Load the base game first, then manage updates through Vela's title update manager.
+Ensure you are loading the base game NSP not the update NSP. Load the base game first, then manage updates through Voland's title update manager.
 
 **Keys dump successfully but title.keys is empty**
 title.keys is populated when you have played or installed games on the console. If you have not launched the game on the Switch the title key may not be present. Launch the game once on the Switch then re-dump.

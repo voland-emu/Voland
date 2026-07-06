@@ -10,7 +10,7 @@ set(CMAKE_TOOLCHAIN_FILE "" CACHE STRING "" FORCE)
 
 #  Dynarmic (vendored submodule)
 # Point this at wherever you cloned dynarmic.
-# Default assumes: Vela/externals/dynarmic
+# Default assumes: Voland/externals/dynarmic
 set(DYNARMIC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../externals/dynarmic"
     CACHE PATH "Path to dynarmic source root")
 

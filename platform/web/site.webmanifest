@@ -1,6 +1,6 @@
 {
-  "name": "Vela",
-  "short_name": "Vela",
+  "name": "Voland",
+  "short_name": "Voland",
   "description": "Browser-first Nintendo Switch emulator",
   "start_url": "/",
   "display": "standalone",

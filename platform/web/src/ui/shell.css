@@ -4,7 +4,7 @@
  * ships inside the boot-critical bundle.
  */
 
-.vela-shell {
+.voland-shell {
   position: fixed;
   inset: 0;
   display: flex;
@@ -14,7 +14,7 @@
   font-family: ui-sans-serif, system-ui, sans-serif;
 }
 
-.vela-header {
+.voland-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -22,39 +22,39 @@
   border-bottom: 1px solid #1c1c28;
 }
 
-.vela-brand {
+.voland-brand {
   display: flex;
   align-items: baseline;
   gap: 12px;
 }
 
-.vela-title {
+.voland-title {
   font-size: 22px;
   font-weight: 600;
   letter-spacing: 0.02em;
 }
 
-.vela-subtitle {
+.voland-subtitle {
   font-size: 12px;
   color: #6b6b78;
   text-transform: uppercase;
   letter-spacing: 0.14em;
 }
 
-.vela-status {
+.voland-status {
   font-size: 12px;
   color: #8d8d99;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.vela-main {
+.voland-main {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 380px;
   min-height: 0;
 }
 
-.vela-hero {
+.voland-hero {
   padding: 56px 64px;
   display: flex;
   flex-direction: column;
@@ -62,14 +62,14 @@
   gap: 24px;
 }
 
-.vela-hero h2 {
+.voland-hero h2 {
   margin: 0;
   font-size: 40px;
   font-weight: 500;
   letter-spacing: -0.01em;
 }
 
-.vela-hero p {
+.voland-hero p {
   margin: 0;
   color: #9a9aa8;
   max-width: 52ch;
@@ -77,7 +77,7 @@
   line-height: 1.55;
 }
 
-.vela-facts {
+.voland-facts {
   margin: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -85,14 +85,14 @@
   max-width: 640px;
 }
 
-.vela-facts > div {
+.voland-facts > div {
   border: 1px solid #1f1f2b;
   border-radius: 10px;
   padding: 14px 16px;
   background: rgba(255, 255, 255, 0.015);
 }
 
-.vela-facts dt {
+.voland-facts dt {
   font-size: 11px;
   color: #6b6b78;
   text-transform: uppercase;
@@ -100,14 +100,14 @@
   margin-bottom: 6px;
 }
 
-.vela-facts dd {
+.voland-facts dd {
   margin: 0;
   font-size: 15px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #e6e6ea;
 }
 
-.vela-log {
+.voland-log {
   display: flex;
   flex-direction: column;
   border-left: 1px solid #1c1c28;
@@ -115,7 +115,7 @@
   min-height: 0;
 }
 
-.vela-log > header {
+.voland-log > header {
   padding: 14px 18px;
   font-size: 11px;
   text-transform: uppercase;
@@ -124,7 +124,7 @@
   border-bottom: 1px solid #1c1c28;
 }
 
-.vela-log-scroll {
+.voland-log-scroll {
   flex: 1;
   overflow-y: auto;
   padding: 12px 18px;
@@ -133,9 +133,9 @@
   word-break: break-word;
 }
 
-.vela-log-scroll .log-line  { margin: 0; }
-.vela-log-scroll .log-info  { color: #c8d5ff; }
-.vela-log-scroll .log-warn  { color: #f3c27d; }
-.vela-log-scroll .log-error { color: #ff8b8b; }
-.vela-log-scroll .log-debug { color: #8d8d99; }
-.vela-log-scroll .log-trace { color: #5a5a66; }
+.voland-log-scroll .log-line  { margin: 0; }
+.voland-log-scroll .log-info  { color: #c8d5ff; }
+.voland-log-scroll .log-warn  { color: #f3c27d; }
+.voland-log-scroll .log-error { color: #ff8b8b; }
+.voland-log-scroll .log-debug { color: #8d8d99; }
+.voland-log-scroll .log-trace { color: #5a5a66; }
