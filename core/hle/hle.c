@@ -12,9 +12,9 @@ void hle_context_init(HLE_Context *context, const CPU_Backend *backend)
   context->svc_call_count = 0;
 }
 
-static const char *svc_name(uint64_t syscall_id)
+static const char *svc_name(uint32_t swi)
 {
-  switch (syscall_id)
+  switch (swi)
   {
   case 0x01:
     return "SetHeapSize";
@@ -38,6 +38,16 @@ static const char *svc_name(uint64_t syscall_id)
     return "SleepThread";
   case 0x0C:
     return "GetThreadPriority";
+  case 0x11:
+    return "SignalEvent";
+  case 0x12:
+    return "ClearEvent";
+  case 0x13:
+    return "MapSharedMemory";
+  case 0x14:
+    return "UnmapSharedMemory";
+  case 0x15:
+    return "CreateTransferMemory";
   case 0x18:
     return "WaitSynchronization";
   case 0x19:
@@ -46,6 +56,10 @@ static const char *svc_name(uint64_t syscall_id)
     return "ArbitrateLock";
   case 0x1B:
     return "ArbitrateUnlock";
+  case 0x1C:
+    return "WaitProcessWideKeyAtomic";
+  case 0x1D:
+    return "SignalProcessWideKey";
   case 0x1F:
     return "ConnectToNamedPort";
   case 0x21:
@@ -68,19 +82,24 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
   SWITCH_ASSERT_ALWAYS(context->cpu_backend != NULL, "hle_on_svc: backend is NULL");
 
   const CPU_Backend *cpu = context->cpu_backend;
-  const uint64_t syscall_id = cpu->get_reg(cpu_state, CPU_REG_X8);
-  const uint64_t pc = cpu->get_pc(cpu_state);
+  CPU_Register_File *regs = cpu->get_register_file(cpu_state);
 
   context->svc_call_count++;
 
-  log_warn("[hle] SVC 0x%02x (X8=0x%llx %s) at PC 0x%016llx - unimplemented (Phase 0 stub)",
-           swi,
-           (unsigned long long)syscall_id,
-           svc_name(syscall_id),
-           (unsigned long long)pc);
-
-  /* Tell the guest the call failed. Some games handle NOT_IMPLEMENTED gracefully. */
-  cpu->set_reg(cpu_state, CPU_REG_X0, HLE_RESULT_NOT_IMPLEMENTED);
+  /* Phase 0 has no real syscall handlers yet - the full dispatch table
+   * (§12) arrives with the memory/threading/IPC SVCs in Phase 1-2. Every
+   * SVC hits the "unimplemented" arm from §12's unimplemented-surface
+   * policy: log, then HLE_RESULT_NOT_IMPLEMENTED in W0. */
+  switch (swi)
+  {
+  default:
+    log_warn("[hle] SVC 0x%02x (%s) at PC 0x%016llx - unimplemented (Phase 0 stub)",
+             swi,
+             svc_name(swi),
+             (unsigned long long)regs->pc);
+    regs->x[0] = HLE_RESULT_NOT_IMPLEMENTED;
+    break;
+  }
 }
 
 void hle_on_undefined(CPU_State *cpu_state, uint32_t instruction, void *userdata)
