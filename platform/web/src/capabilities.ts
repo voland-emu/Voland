@@ -1,6 +1,6 @@
 /**
- * Feature detection (see docs/DESIGN.md section 12, "Progressive enhancement
- * by platform"). Phase 0 reports capabilities up front so boot-blocking
+ * Feature detection (see docs/DESIGN.md section 16, "Progressive
+ * enhancement"). Phase 0 reports capabilities up front so boot-blocking
  * problems (no COOP/COEP, no WebGPU, no OPFS) surface as user-visible
  * errors rather than silent failures deep in a worker.
  */
@@ -8,7 +8,7 @@
 export interface PlatformCapabilities {
   readonly webGPU:                 boolean;
   readonly opfs:                   boolean;
-  readonly sharedArrayBuffer:      boolean;
+  readonly crossOriginIsolated:    boolean;
   readonly filesystemAccessApi:    boolean;
   readonly webHID:                 boolean;
   readonly webNFC:                 boolean;
@@ -22,7 +22,7 @@ export function detectCapabilities(): PlatformCapabilities {
   return {
     webGPU:              "gpu" in navigator,
     opfs:                storage !== undefined && "getDirectory" in storage,
-    sharedArrayBuffer:   typeof crossOriginIsolated === "boolean" ? crossOriginIsolated : false,
+    crossOriginIsolated: typeof crossOriginIsolated === "boolean" ? crossOriginIsolated : false,
     filesystemAccessApi: "showDirectoryPicker" in window,
     webHID:              "hid" in navigator,
     webNFC:              "NDEFReader" in window,

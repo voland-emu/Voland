@@ -1,32 +1,32 @@
 /**
- * Phase 0 boot sequence. The page loads as a black screen with a boot log
- * on the right; once the CPU, GPU, and audio workers each report "ready"
- * we dynamically import the Solid shell and fade the boot overlay out.
- * Keeping the Solid runtime out of the boot-critical path means the black
- * screen appears immediately and the UI chunk only loads when the core
- * has actually come up.
+ * Phase 0 boot sequence (docs/DESIGN.md section 16). The page loads as a
+ * black screen with a boot log on the right; once the CPU and GPU workers
+ * each report "ready" we dynamically import the Solid shell and fade the
+ * boot overlay out. Keeping the Solid runtime out of the boot-critical
+ * path means the black screen appears immediately and the UI chunk only
+ * loads once the core has actually come up.
+ *
+ * There is no Audio Worker (§14) - the audio ring is drained directly by
+ * an AudioWorkletProcessor once DSP HLE exists (Phase 4). Phase 0 only
+ * needs the CPU and GPU workers to validate the boot path end to end.
  */
 
-import type {
-  AudioToMainMessage,
-  CPUToMainMessage,
-  GPUToMainMessage,
-  MainToAudioMessage,
-  MainToCPUMessage,
-  MainToGPUMessage,
-  SharedMemory,
-} from "@bindings/protocol";
+import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
+import type { MemoryLayout } from "@bindings/layout";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
+import { publishBootMilestone } from "./e2e-hooks";
 import { appendLogLine, setStatus } from "./log";
 
-/** Guest memory sizing. 4 GB guest RAM requires memory64 + SharedArrayBuffer;
- * for Phase 0 we only touch a small slice, but the allocation size matches
- * the Switch 1 RAM budget so we catch out-of-memory problems early. */
-const GUEST_RAM_BYTES   = 4 * 1024 * 1024 * 1024;
-const GUEST_RAM_BYTES_FALLBACK = 16 * 1024 * 1024; // for testing on devices that can't do 4 GB
-const FRAME_SYNC_BYTES  = 4;
-const AUDIO_RING_BYTES  = 1 * 1024 * 1024;
-const TRACE_BUFFER_BYTES = 2 * 1024 * 1024;
+/**
+ * Total shared linear memory: guest RAM + every layout.h region +
+ * Emscripten's own data/stack/heap (~5.25GiB). Fixed at boot -
+ * `initial === maximum`, growth disabled, so views never detach (§4).
+ * This MUST equal CMakeLists.txt's INITIAL_MEMORY/MAXIMUM_MEMORY in bytes
+ * (5_637_144_576) or the core module fails to instantiate.
+ */
+const WASM_PAGE_BYTES = 65_536n;
+const TOTAL_MEMORY_BYTES = 5_637_144_576n; // ~5.25GiB
+const TOTAL_MEMORY_PAGES = TOTAL_MEMORY_BYTES / WASM_PAGE_BYTES; // 86016n
 
 const WORKER_READY_TIMEOUT_MS = 10_000;
 
@@ -43,27 +43,51 @@ function reportCapabilities(caps: PlatformCapabilities): void {
   appendLogLine("debug", `capabilities: ${lines.join(", ")}`);
 }
 
-function allocateSharedMemory(): SharedMemory | null {
+/** Guarded one-time reload so a fresh visit under SW-injected COOP/COEP
+ * headers (rather than real server headers) gets a second pass once the
+ * Service Worker actually controls the page (§16). */
+async function reloadOnceForCrossOriginIsolation(): Promise<boolean> {
+  if (sessionStorage.getItem("voland-coi-reload-attempted")) return false;
+  sessionStorage.setItem("voland-coi-reload-attempted", "1");
+  if ("serviceWorker" in navigator) {
+    await navigator.serviceWorker.ready;
+  }
+  location.reload();
+  return true;
+}
+
+/**
+ * lib.dom.d.ts's `WebAssembly.MemoryDescriptor` doesn't know about the
+ * memory64 shape yet: `initial`/`maximum` are BigInt page counts, not
+ * Number, once `address: "i64"` is present.
+ */
+interface Memory64Descriptor {
+  readonly initial: bigint;
+  readonly maximum: bigint;
+  readonly shared: true;
+  readonly address: "i64";
+}
+
+function allocateSharedMemory(): WebAssembly.Memory | null {
+  // Verified directly against this environment's V8 and against
+  // Emscripten's own -sMEMORY64=1 glue output: both use `address: "i64"`
+  // with BigInt page counts, NOT `index: "i64"` with Number page counts.
+  // The latter is silently accepted as an unrecognized property and falls
+  // back to an ordinary 32-bit memory, which then throws RangeError the
+  // moment page counts exceed the wasm32 cap of 65536 pages (4GiB) -
+  // exactly this case. (docs/DESIGN.md's own §16 example uses `index`;
+  // that's stale relative to what actually shipped - do not copy it.)
+  const descriptor: Memory64Descriptor = {
+    initial: TOTAL_MEMORY_PAGES,
+    maximum: TOTAL_MEMORY_PAGES,
+    shared: true,
+    address: "i64",
+  };
   try {
-    return {
-      guestRAM:  new SharedArrayBuffer(GUEST_RAM_BYTES),
-      frameSync: new SharedArrayBuffer(FRAME_SYNC_BYTES),
-      audioRing: new SharedArrayBuffer(AUDIO_RING_BYTES),
-      traceBuf:  new SharedArrayBuffer(TRACE_BUFFER_BYTES),
-    };
-  } catch {
-    appendLogLine("warn", "4 GiB allocation failed, falling back to 16 MiB");
-    try {
-      return {
-        guestRAM:  new SharedArrayBuffer(GUEST_RAM_BYTES_FALLBACK),
-        frameSync: new SharedArrayBuffer(FRAME_SYNC_BYTES),
-        audioRing: new SharedArrayBuffer(AUDIO_RING_BYTES),
-        traceBuf:  new SharedArrayBuffer(TRACE_BUFFER_BYTES),
-      };
-    } catch (e) {
-      appendLogLine("error", `Fallback SharedArrayBuffer allocation failed: ${(e as Error).message}`);
-      return null;
-    }
+    return new WebAssembly.Memory(descriptor as unknown as WebAssembly.MemoryDescriptor);
+  } catch (e) {
+    appendLogLine("error", `WebAssembly.Memory allocation failed: ${(e as Error).message}`);
+    return null;
   }
 }
 
@@ -97,132 +121,145 @@ function attachWorkerLogRelay<TMessage extends { type: string }>(
 interface BootResult {
   readonly adapterLabel: string;
   readonly cpuBackend:   string;
-  readonly ramMiB:       number;
+  readonly guestRamMiB:  number;
 }
 
 async function boot(): Promise<BootResult | null> {
-  appendLogLine("info", "Vela web - Phase 0 skeleton booting");
+  appendLogLine("info", "Voland web - Phase 0 skeleton booting");
 
-  /* 1. Capability detection. */
+  if ("serviceWorker" in navigator) {
+    // Vite serves sw.ts directly (on-the-fly transform) in dev; the
+    // production build emits it as a stable, unhashed sw.js (vite.config.ts).
+    const swUrl = import.meta.env.DEV ? "/sw.ts" : "/sw.js";
+    try {
+      await navigator.serviceWorker.register(swUrl, { type: "module" });
+    } catch (e) {
+      appendLogLine("warn", `Service Worker registration failed: ${(e as Error).message}`);
+    }
+  }
+
+  if (!crossOriginIsolated) {
+    const reloaded = await reloadOnceForCrossOriginIsolation();
+    if (reloaded) return null; // navigation is in flight
+    fatal("Cross-origin isolation is not active. Ensure the server sets " +
+          "COOP: same-origin and COEP: require-corp (§16).");
+    return null;
+  }
+
   const caps = detectCapabilities();
   reportCapabilities(caps);
 
-  if (!caps.sharedArrayBuffer) {
-    fatal("cross-origin isolation inactive, SharedArrayBuffer is unavailable. " +
-          "Serve with COOP: same-origin and COEP: require-corp.");
-    return null;
-  }
   if (!caps.webGPU) {
-    appendLogLine("warn", "WebGPU unavailable. GPU worker will not produce pixels, but the boot flow will still validate.");
-  }
-
-  /* 2. Shared memory. */
-  const shared = allocateSharedMemory();
-  if (!shared) {
-    fatal("failed to allocate guest RAM (4 GiB SharedArrayBuffer). Close tabs or lower the size.");
+    fatal("WebGPU is not available. Update your browser (WebGPU is Baseline " +
+          "since Jan 2026: Chrome/Edge 113+, Safari 26+, Firefox 141+).");
     return null;
   }
-  const ramMiB = Math.round(shared.guestRAM.byteLength / (1024 * 1024));
-  appendLogLine("info", `allocated guest RAM: ${ramMiB} MiB`);
+  if (!caps.opfs) {
+    fatal("Origin Private Filesystem (OPFS) is not available.");
+    return null;
+  }
 
-  /* 3. Phase 0 GPU worker sanity: the framebuffer is not yet shown in the
-   *    DOM. We hand the worker a detached OffscreenCanvas so the WebGPU
-   *    init still runs against a real device; Phase 2+ will move the
-   *    canvas into the Solid shell and route pixels out. */
-  const scratchCanvas = document.createElement("canvas");
-  scratchCanvas.width  = 1280;
-  scratchCanvas.height = 720;
-  const offscreen = scratchCanvas.transferControlToOffscreen();
+  /* ONE memory. Guest RAM and every other shared region live inside it
+   * (§4). No separate SharedArrayBuffers. */
+  const memory = allocateSharedMemory();
+  if (!memory) {
+    fatal("Could not allocate emulator memory (~5.25GiB). Your browser or " +
+          "device limits shared memory; use a native build.");
+    return null;
+  }
+  appendLogLine("info", `allocated shared memory: ${TOTAL_MEMORY_PAGES} pages (~5.25GiB)`);
+  publishBootMilestone(memory);
 
-  /* 4. Workers. Vite's `new URL(..., import.meta.url)` + `type: "module"`
-   *    is required under COEP: require-corp. */
-  const cpuWorker   = new Worker(new URL("../workers/cpu.worker.ts",   import.meta.url), { type: "module" });
-  const gpuWorker   = new Worker(new URL("../workers/gpu.worker.ts",   import.meta.url), { type: "module" });
-  const audioWorker = new Worker(new URL("../workers/audio.worker.ts", import.meta.url), { type: "module" });
+  const canvas = document.getElementById("game") as HTMLCanvasElement | null;
+  if (!canvas) {
+    fatal("boot: #game canvas missing from index.html");
+    return null;
+  }
+  const offscreen = canvas.transferControlToOffscreen();
+
+  const cpuWorker = new Worker(new URL("../workers/cpu.worker.ts", import.meta.url), { type: "module" });
+  const gpuWorker = new Worker(new URL("../workers/gpu.worker.ts", import.meta.url), { type: "module" });
 
   type Slot = "pending" | "ready" | "failed";
-  let cpuSlot:   Slot = "pending";
-  let gpuSlot:   Slot = "pending";
-  let audioSlot: Slot = "pending";
+  let cpuSlot: Slot = "pending";
+  let gpuSlot: Slot = "pending";
 
   let cpuBackend:   string | null = null;
   let adapterLabel: string | null = null;
+  let layout:       MemoryLayout | null = null;
 
   function slotGlyph(slot: Slot): string {
     return slot === "ready" ? "ok" : slot === "failed" ? "fail" : "…";
   }
   function updateStatus(): void {
-    setStatus([
-      `cpu=${slotGlyph(cpuSlot)}`,
-      `gpu=${slotGlyph(gpuSlot)}`,
-      `audio=${slotGlyph(audioSlot)}`,
-    ].join(" · "));
+    setStatus([`cpu=${slotGlyph(cpuSlot)}`, `gpu=${slotGlyph(gpuSlot)}`].join(" · "));
   }
   updateStatus();
 
-  const allReady = new Promise<void>((resolve) => {
-    const maybeResolve = () => {
-      if (cpuSlot !== "pending" && gpuSlot !== "pending" && audioSlot !== "pending") {
-        resolve();
-      }
-    };
-
+  const cpuReady = new Promise<void>((resolve) => {
     attachWorkerLogRelay<CPUToMainMessage>("cpu", cpuWorker, msg => {
+      if (msg.type === "layout") {
+        layout = msg.layout;
+        appendLogLine("info", `layout handshake: guestRamBase=0x${layout.guestRamBase.toString(16)}`);
+        gpuWorker.postMessage(
+          { type: "init", canvas: offscreen, memory, layout } satisfies MainToGPUMessage,
+          [offscreen],
+        );
+        return;
+      }
       if (msg.type === "ready") {
         cpuBackend = `${msg.backendName} v${msg.backendVersion}`;
         appendLogLine("info", `cpu backend: ${cpuBackend}`);
         cpuSlot = "ready";
         updateStatus();
-        maybeResolve();
+        resolve();
       } else if (msg.type === "halted") {
         appendLogLine("warn", "cpu halted");
       }
-    }, () => { cpuSlot = "failed"; updateStatus(); maybeResolve(); });
+    }, () => { cpuSlot = "failed"; updateStatus(); resolve(); });
+  });
 
+  const gpuReady = new Promise<void>((resolve) => {
     attachWorkerLogRelay<GPUToMainMessage>("gpu", gpuWorker, msg => {
       if (msg.type === "ready") {
         adapterLabel = msg.adapterName ?? "Software/Unknown";
         appendLogLine("info", `gpu adapter: ${adapterLabel}`);
         gpuSlot = "ready";
         updateStatus();
-        maybeResolve();
+        resolve();
       }
-    }, () => { gpuSlot = "failed"; updateStatus(); maybeResolve(); });
+    }, () => { gpuSlot = "failed"; updateStatus(); resolve(); });
+  });
 
-    attachWorkerLogRelay<AudioToMainMessage>("audio", audioWorker, msg => {
-      if (msg.type === "ready") {
-        appendLogLine("info", "audio worker ready");
-        audioSlot = "ready";
-        updateStatus();
-        maybeResolve();
-      }
-    }, () => { audioSlot = "failed"; updateStatus(); maybeResolve(); });
-
+  const timeout = new Promise<void>((resolve) => {
     window.setTimeout(() => {
-      if (cpuSlot === "pending")   { cpuSlot   = "failed"; appendLogLine("error", `cpu worker did not report within ${WORKER_READY_TIMEOUT_MS}ms`); }
-      if (gpuSlot === "pending")   { gpuSlot   = "failed"; appendLogLine("error", `gpu worker did not report within ${WORKER_READY_TIMEOUT_MS}ms`); }
-      if (audioSlot === "pending") { audioSlot = "failed"; appendLogLine("error", `audio worker did not report within ${WORKER_READY_TIMEOUT_MS}ms`); }
+      if (cpuSlot === "pending") { cpuSlot = "failed"; appendLogLine("error", `cpu worker did not report within ${WORKER_READY_TIMEOUT_MS}ms`); }
+      if (gpuSlot === "pending") { gpuSlot = "failed"; appendLogLine("error", `gpu worker did not report within ${WORKER_READY_TIMEOUT_MS}ms`); }
       updateStatus();
-      maybeResolve();
+      resolve();
     }, WORKER_READY_TIMEOUT_MS);
   });
 
-  const cpuInit:   MainToCPUMessage   = { type: "init", shared };
-  const gpuInit:   MainToGPUMessage   = { type: "init", canvas: offscreen, shared };
-  const audioInit: MainToAudioMessage = { type: "init", audioRing: shared.audioRing };
+  cpuWorker.postMessage({ type: "init", memory } satisfies MainToCPUMessage);
+  appendLogLine("info", "cpu worker posted init message; awaiting layout handshake");
 
-  cpuWorker.postMessage(cpuInit);
-  gpuWorker.postMessage(gpuInit, [offscreen]);
-  audioWorker.postMessage(audioInit);
+  await Promise.race([Promise.all([cpuReady, gpuReady]), timeout]);
 
-  appendLogLine("info", "workers posted init messages");
+  /* rAF stops in hidden tabs, freezing input writes (§18); auto-pause
+   * keeps the policy explicit instead of leaving it as a silent symptom. */
+  document.addEventListener("visibilitychange", () => {
+    const msg: MainToCPUMessage = { type: document.hidden ? "pause" : "resume" };
+    cpuWorker.postMessage(msg);
+  });
 
-  await allReady;
-
+  // TypeScript's control flow analysis doesn't see assignments made inside
+  // closures (the "layout" case above), so it treats `layout` as still
+  // `null` here; the cast reasserts the declared type.
+  const finalLayout = layout as MemoryLayout | null;
   return {
     adapterLabel: adapterLabel ?? "unavailable",
     cpuBackend:   cpuBackend   ?? "unavailable",
-    ramMiB,
+    guestRamMiB:  finalLayout ? Number(finalLayout.guestRamSize / (1024n * 1024n)) : 0,
   };
 }
 

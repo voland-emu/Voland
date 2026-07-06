@@ -13,7 +13,7 @@ import { getLogHistory, getStatus, subscribeLogs, subscribeStatus } from "../log
 interface AppProps {
   readonly adapterLabel: string;
   readonly cpuBackend:   string;
-  readonly ramMiB:       number;
+  readonly guestRamMiB:  number;
 }
 
 function App(props: AppProps) {
@@ -33,29 +33,29 @@ function App(props: AppProps) {
   });
 
   return (
-    <div class="vela-shell">
-      <header class="vela-header">
-        <div class="vela-brand">
-          <span class="vela-title">Vela</span>
-          <span class="vela-subtitle">Phase 0 · skeleton</span>
+    <div class="voland-shell">
+      <header class="voland-header">
+        <div class="voland-brand">
+          <span class="voland-title">Voland</span>
+          <span class="voland-subtitle">Phase 0 · skeleton</span>
         </div>
-        <div class="vela-status">{status()}</div>
+        <div class="voland-status">{status()}</div>
       </header>
 
-      <section class="vela-main">
-        <div class="vela-hero">
+      <section class="voland-main">
+        <div class="voland-hero">
           <h2>Runtime online.</h2>
-          <p>All three workers initialised. The core is idle, waiting for a title.</p>
-          <dl class="vela-facts">
+          <p>Both workers initialised. The core is idle, waiting for a title.</p>
+          <dl class="voland-facts">
             <div><dt>CPU backend</dt><dd>{props.cpuBackend}</dd></div>
             <div><dt>GPU adapter</dt><dd>{props.adapterLabel}</dd></div>
-            <div><dt>Guest RAM</dt><dd>{props.ramMiB} MiB</dd></div>
+            <div><dt>Guest RAM</dt><dd>{props.guestRamMiB} MiB</dd></div>
           </dl>
         </div>
 
-        <aside class="vela-log">
+        <aside class="voland-log">
           <header>event log</header>
-          <div class="vela-log-scroll">
+          <div class="voland-log-scroll">
             <For each={logs()}>
               {(entry) => (
                 <p class={`log-line log-${entry.level}`}>
