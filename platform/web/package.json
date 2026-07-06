@@ -18,7 +18,7 @@
     "e2e": "playwright test"
   },
   "dependencies": {
-    "solid-js": "^1.8.0"
+    "solid-js": "^1.9.13"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
