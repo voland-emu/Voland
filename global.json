@@ -4,8 +4,8 @@
     "ninja":      ">=1.11",
     "clang":      ">=16",
     "emscripten": ">=3.1.60",
-    "node":       ">=20",
+    "node":       ">=22.6",
     "pnpm":       ">=9"
   },
-  "notes": "Minimum tool versions required to build Vela. Core is C11 strict."
+  "notes": "Minimum tool versions required to build Voland. Core is C11 strict. Node >=22.6 is required for --experimental-strip-types, used by `npm run test` to run platform/web/tests/unit/*.test.ts directly with no build step."
 }

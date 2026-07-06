@@ -3,17 +3,25 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "description": "Web platform layer for the Vela C core. WASM-first.",
+  "description": "Web platform layer for the Voland C core. WASM-first.",
+  "engineStrict": true,
+  "engines": {
+    "pnpm": ">=9.0.0",
+    "node": ">=22.6"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "solid-js": "^1.8.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.48.0",
     "@webgpu/types": "^0.1.69",
     "typescript": "^5.4.0",
     "vite": "^5.2.0",
