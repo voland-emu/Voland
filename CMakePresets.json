@@ -1,0 +1,41 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "native-noop",
+      "displayName": "Native (noop backend)",
+      "description": "Default development build. No CPU execution, but exercises the full core/emulator/HLE/layout wiring (see CLAUDE.md).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/native-noop",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CPU_BACKEND": "noop"
+      }
+    },
+    {
+      "name": "web",
+      "displayName": "Web (Emscripten)",
+      "description": "WASM build per docs/DESIGN.md §24. Requires $EMSDK to be set - run emsdk_env.{sh,ps1,bat} first.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/web",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CPU_BACKEND": "noop"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "native-noop", "configurePreset": "native-noop" },
+    { "name": "web", "configurePreset": "web" }
+  ],
+  "testPresets": [
+    {
+      "name": "native-noop",
+      "configurePreset": "native-noop",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": true }
+    }
+  ]
+}
