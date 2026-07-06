@@ -23,7 +23,7 @@
   "devDependencies": {
     "@playwright/test": "^1.48.0",
     "@webgpu/types": "^0.1.69",
-    "typescript": "^5.4.0",
+    "typescript": "^6.0.3",
     "vite": "^5.2.0",
     "vite-plugin-solid": "^2.10.0"
   }
