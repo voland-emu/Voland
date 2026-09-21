@@ -2192,7 +2192,9 @@ flowchart LR
 - [x] Web scaffolding: single-memory boot sequence, CPU worker instantiates core, layout handshake (§16)
 - [x] COOP/COEP + SW reload path working end-to-end
 
-Implemented, not yet build-verified: this repository's sandbox has no `emsdk`/`cmake`/C toolchain installed, so the Emscripten build (`switch_core.js`/`.wasm`) and the native CMake build have not actually been compiled and run here. `cpu.worker.ts` fails loudly with a real error (rather than a fake "ready") until `platform/web/public/core/switch_core.{js,wasm}` exists - see its header comment for the exact build + copy steps.
+Build-verified: both the `native-noop` and `web` presets configure, compile, and (for `native-noop`) pass `ctest` under GCC 16.2.1 and Emscripten 6.0.9/Clang respectively (verified on Linux/WSL). `web` produces `switch_core.{js,wasm}`; `cpu.worker.ts` still fails loudly with a real error (rather than a fake "ready") until those files are copied to `platform/web/public/core/` - that copy step is still manual, not wired into CI - see the worker's header comment for the exact build + copy steps.
+
+**Known issue - native build fails under MSVC:** `core/common/log.h` declares `log_message` with an unconditional `__attribute__((format(printf, 2, 3)))`, a GCC/Clang-only extension with no guard for other compilers. This is a hard compile error under MSVC (`cl.exe`, Visual Studio Build Tools), breaking every translation unit that includes `log.h` (7 of 12 in `native-noop`). Not yet fixed; fix requires a `core/**/*.h` change and so goes through the interface-header-review workflow before landing. GCC and Clang (including emcc) are unaffected - `__attribute__` is native to both.
 
 ### Phase 1 — Load & Memory
 
