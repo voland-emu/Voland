@@ -18,8 +18,8 @@ typedef struct NoopState
   uint64_t fault_address;
   uint64_t cycles_consumed;
 
-  VMM_Context *vmm; /* unused until Phase 1 (§5); the no-op backend never
-                      * performs a guest memory access. */
+  VMM_Context *vmm; /* held per the §8 contract; the no-op backend never
+                      * performs a guest memory access, so never walks it. */
   void *userdata;
   CPU_SVC_Handler svc_handler;
   CPU_Undefined_Handler undefined_handler;

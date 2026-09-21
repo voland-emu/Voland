@@ -1,12 +1,13 @@
 /**
- * End-to-end smoke test for Phase 0. Exercises the full path:
- *   emulator_create -> layout reserved -> set register -> bounded run
+ * End-to-end smoke test. Exercises the full path:
+ *   emulator_create -> layout reserved -> vmm live -> set register -> bounded run
  *   (no-op backend honors the exit-reason contract) -> fire an SVC
  *   manually via the swi immediate -> confirm the HLE dispatcher ran and
  *   wrote HLE_RESULT_NOT_IMPLEMENTED into X0.
  */
 #include "common/layout.h"
 #include "common/log.h"
+#include "common/vmm.h"
 #include "cpu/cpu.h"
 #include "emulator.h"
 #include "hle/hle.h"
@@ -42,6 +43,19 @@ int main(void)
   CHECK(layout->guest_ram_base != 0);
   CHECK(layout->page_table_l1_base != 0);
   CHECK(layout->trace_buffer_base != 0);
+
+  /* Softmmu (§5): created by emulator_create over the layout's L1 region
+   * and handed to the backend. A round trip through a mapping proves the
+   * checked path is wired end to end. */
+  CHECK(emu.vmm != NULL);
+  CHECK((uint64_t)(uintptr_t)vmm_page_table_l1(emu.vmm) == layout->page_table_l1_base);
+  err = vmm_map(emu.vmm, 0x8000000ULL, 0x1000ULL, VMM_PAGE_SIZE, VMM_PERM_RW);
+  CHECK(err.code == RESULT_OK);
+  CHECK(vmm_write32(emu.vmm, 0x8000010ULL, 0xC0FFEE42u).code == RESULT_OK);
+  uint32_t word = 0;
+  CHECK(vmm_read32(emu.vmm, 0x8000010ULL, &word).code == RESULT_OK);
+  CHECK(word == 0xC0FFEE42u);
+  CHECK(vmm_unmap(emu.vmm, 0x8000000ULL, VMM_PAGE_SIZE).code == RESULT_OK);
 
   /* Register read/write round-trip. */
   cpu->set_reg(emu.cpu_state, CPU_REG_X0, 0xdeadbeefcafebabeULL);

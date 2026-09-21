@@ -1,14 +1,15 @@
 # CLAUDE.md
 
 Voland: Nintendo Switch emulator, web-first (WASM/WebGPU), C11 core, thin
-platform layers. The authoritative design is `docs/DESIGN.md` (v3.21.0).
+platform layers. The authoritative design is `docs/DESIGN.md` (v3.22.0).
 Read §1 before any task. Read the section governing your task before
 writing code — section numbers are cited below.
 
 ## Current phase
 
-**Phase 0 — Skeleton.** Task list: DESIGN.md §25. Do not start work
-belonging to a later phase, even if it seems adjacent.
+**Phase 1 — Load & Memory.** Task list: DESIGN.md §25. Phase 0 is
+complete. Do not start work belonging to a later phase, even if it seems
+adjacent.
 <!-- Maintainer updates this line at each phase gate. -->
 
 ## Hard rules — violating any of these fails review

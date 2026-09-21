@@ -542,14 +542,22 @@ Error vmm_write8 (VMM_Context* ctx, uint64_t gva, uint8_t  value);
 // becomes a remap race — and the Phase 8 per-core-worker experiment voids the
 // guarantee entirely. Long-lived references hold GVAs and re-translate at use;
 // bulk data uses vmm_read/write_block copies.
-// Debug builds enforce this: outstanding borrows are tracked; any
-// vmm_map/unmap/reprotect overlapping a live borrow asserts, and handler exit
-// asserts no borrows remain. (The GPU command ring is exempt by design: its
+// Debug builds enforce this: the HLE dispatcher (and any loader doing a
+// section-copy pass) brackets its work in vmm_borrow_scope_begin/end; every
+// borrow is recorded; guest_to_host outside a scope asserts; any
+// vmm_map/unmap/reprotect overlapping a live borrow asserts; and scope end
+// (handler exit) RELEASES every borrow made inside it — there is no explicit
+// release call, so nothing can "remain" to assert on. Release builds compile
+// the scope calls to no-ops. (The GPU command ring is exempt by design: its
 // records carry guest PHYSICAL ranges, and stale-physical reads after guest
 // remapping are real-hardware DMA semantics that games already fence against.)
 Error vmm_guest_to_host(VMM_Context* ctx, uint64_t gva, uint64_t size,
                         uint32_t required_perms, /* out */ void** host_ptr);
+void  vmm_borrow_scope_begin(VMM_Context* ctx);
+void  vmm_borrow_scope_end(VMM_Context* ctx);
 ```
+
+`vmm_guest_to_host` additionally requires the backing pages to be host-contiguous across the whole extent — a single pointer cannot span scattered physical pages — and returns `RESULT_NOT_CONTIGUOUS` otherwise, so callers can fall back to `vmm_read_block`/`vmm_write_block` programmatically. Translation faults from the checked API return `RESULT_MEMORY_FAULT`, with the detailed `VMM_Fault` (kind, required perms, faulting GVA) retained in `vmm_last_fault()` for HLE to map onto a Horizon result. A PTE with a nonzero host offset and zero permission bits is a mapped-but-inaccessible page (guard/reserved), distinct from unmapped (`PTE == 0`); `vmm_query` reports it as mapped with `VMM_PERM_NONE`. L2 tables come from a vmm-owned 32MB arena (`VMM_L2_TABLE_CAPACITY` = 256 tables = 16GB of mappable VA) and are recycled through a freelist when their last page is unmapped; exhaustion is `RESULT_OUT_OF_MEMORY` with no partial mutation — every `vmm_map/unmap/reprotect` validates its whole range before touching a table.
 
 The interpreter calls `vmm_read*/write*`. HLE services call `vmm_*` directly — **HLE never routes memory access through the CPU backend**; the backend's job is instruction execution, not address translation. The JIT emits the inline fast path against the same tables.
 
@@ -2211,7 +2219,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 1 — Load & Memory
 
-- [ ] **Softmmu** (`vmm.{h,c}`): page tables, map/unmap/reprotect/query, read/write, guest_to_host (§5)
+- [x] **Softmmu** (`vmm.{h,c}`): page tables, map/unmap/reprotect/query, read/write, guest_to_host (§5)
 - [ ] Decrypted-NCA parsing (RomFS, ExeFS, npdm — no encryption handling per §1.6) + **NSO loader** (LZ4 segments) and process bootstrap per §12
 - [ ] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request
 - [ ] Load executable sections into guest memory *through vmm mappings*
@@ -2367,6 +2375,12 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 *Document version: 3.21.0*
 *Last updated: September 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.21 → v3.22 (summary)
+
+- **§5 softmmu implemented; §25 Phase 0 closed, Phase 1 opened.** `core/common/vmm.{h,c}` replaces the Phase 0 opaque placeholder with the full two-level page-table design as specified: 39-bit VA, 4KB pages, 8192-entry L1 in the layout's fixed region, 16384-entry L2s carved on demand from a vmm-owned 32MB arena (256 tables, freelist-recycled), PTE = host offset | RWX. Checked `Error` API (map/unmap/reprotect/query, read/write 8–64, block copies, `guest_to_host`) and `static inline` walk/read/write helpers over the raw L1 pointer (`vmm_page_table_l1()`) share one implementation. All mutations are validate-then-commit. `emulator_create` now creates the vmm after the layout and passes it to the CPU backend instead of `NULL`. Tests: `tests/vmm_test.c` (lifecycle, validation, physical-backing round trips, mirrors, fault kinds, reprotect, unmap/holes, cross-page all-or-nothing, scattered block copies, `guest_to_host` contiguity, run merging across L2 boundaries, L2 exhaustion + recycling, inline≡checked, borrow scopes); `smoke_phase0` gains a vmm round trip. Verified: MSVC 19.51 Debug and GCC 16.2.1 Debug + Release, 3/3 ctest, zero warnings under the project's strict flag set.
+- **§5 deviations, stated:** (1) *borrow tracking* — the v3.17 wording "handler exit asserts no borrows remain" was unimplementable (borrows have no release call, so nothing can remain); the contract is now explicit `vmm_borrow_scope_begin/end` bracketing each handler, with scope end *releasing* all borrows, `guest_to_host` outside a scope asserting, and mutations overlapping a live borrow asserting — same protection, one sentence corrected. (2) `Result` gains `RESULT_MEMORY_FAULT` (translation fault; detail in `vmm_last_fault()`) and `RESULT_NOT_CONTIGUOUS` (`guest_to_host` over scattered physical pages — callers fall back to block copies); HLE needs both to be distinguishable from `RESULT_INVALID_ARGUMENT` to pick the right Horizon result. (3) `VMM_PERM_NONE` mappings are legal and distinct from unmapped, giving `QueryMemory` its reserved/guard-page state for free from the PTE format.
+- **Noted, not fixed (separate issue):** under Emscripten, `layout.c` carves guest RAM from the arena *before* the small regions, so the L1 table lands above 4GB — §4 wants page tables in the low 4GB for engine fast paths. Order of carving should flip on the web path.
 
 ### Changelog v3.20 → v3.21 (summary)
 
