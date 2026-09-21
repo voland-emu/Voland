@@ -1,19 +1,22 @@
 # Dumping Guide
 
-This guide covers how to obtain the files Voland requires from a Nintendo Switch you own. These steps require a Nintendo Switch that can run custom firmware. **This guide is for your own hardware only.**
+This guide covers how to produce the files Voland requires from a Nintendo Switch you own. These steps require a Nintendo Switch that can run custom firmware. **This guide is for your own hardware only.**
 
 Voland does not endorse piracy. Do not use this guide to obtain files from hardware you do not own.
 
 ---
 
-## What you need
+## What Voland accepts — and what it does not
 
-| File | Purpose | Required |
+Voland loads **decrypted NCA files only**. It never asks for your keys, never reads an NSP or XCI, and contains no decryption code. Decryption is something *you* do, once, with separate tools, before the files ever reach Voland. This is a deliberate legal boundary (see [DESIGN.md §1.6](DESIGN.md#16-legal-scope-boundaries)), not a missing feature, and it will not change.
+
+| File | Who uses it | Required |
 |---|---|---|
-| `prod.keys` | Decrypts game files and firmware | Yes |
-| `title.keys` | Per-game decryption keys | Yes |
-| Game files (NSP / XCI) | Your game dumps | Yes |
-| Firmware | Switch OS files | Optional - most games work without it |
+| `prod.keys`, `title.keys` | **hactool** (on your PC) — never Voland | Yes, for decryption |
+| Game dump (NSP / XCI) | **hactool** — never Voland | Yes, as decryption input |
+| **Decrypted NCA files** | **Voland** | Yes — this is the only thing Voland reads |
+
+The flow is: Switch → keys + game dump → hactool on your PC → decrypted NCAs → Voland.
 
 ---
 
@@ -48,7 +51,7 @@ Do not use other guides - they are frequently outdated and some contain malware.
 
 ## Step 3 - Dump your keys
 
-Keys are dumped using **Lockpick_RCM**, a payload that runs before the Switch OS boots and extracts cryptographic keys directly from hardware.
+Keys are dumped using **Lockpick_RCM**, a payload that runs before the Switch OS boots and extracts cryptographic keys directly from hardware. You need them for Step 5 (decryption on your PC). Voland never sees them.
 
 ### Download
 
@@ -71,11 +74,7 @@ Keys are saved to your microSD card at:
 /switch/title.keys
 ```
 
-Copy both files to your PC.
-
-### Provide to Voland
-
-When you first open Voland it will ask you to select your `prod.keys` file. Select it from wherever you saved it on your PC. Voland reads it in place - it is never uploaded or copied anywhere.
+Copy both files to your PC. Keep them private; they are tied to your console.
 
 ---
 
@@ -106,44 +105,106 @@ Use **nxdumptool** to dump games installed from the eShop.
 
 ### Updates and DLC
 
-Dump updates and DLC separately using the same nxdumptool flow. Select "dump update NSP" or "dump DLC NSP" from the game's submenu.
+Dump updates and DLC separately using the same nxdumptool flow. Select "dump update NSP" or "dump DLC NSP" from the game's submenu. (Update and DLC support in Voland is a later milestone; dump them now if you like, but the base game is what you need first.)
 
-### Provide to Voland
-
-When you first open Voland it will ask you to select a games folder. Point it at the folder containing your XCI and NSP files. Voland reads them in place - they are never uploaded or copied into browser storage.
+Copy the dump to your PC. **Do not give it to Voland** - it is encrypted, and Voland will refuse it. Continue to Step 5.
 
 ---
 
-## Step 5 - Dump firmware (optional)
+## Step 5 - Decrypt to NCA on your PC
 
-Most games run without real firmware - Voland's HLE layer implements the Switch OS services directly. Firmware is only needed for games that depend on specific system behavior that HLE does not yet cover.
+This is the step that produces the files Voland actually reads. It runs entirely on your PC with **hactool**, a separate open-source tool that is not part of Voland.
 
-If you need firmware, use **Tegra Explorer** or **NXDumpFuse** to dump system firmware from your Switch's NAND. Instructions are on the [NH Switch Guide](https://switch.hacks.guide/).
+### Install hactool
+
+Download a release from the [hactool GitHub page](https://github.com/SciresM/hactool/releases) (or build it from source). Place your `prod.keys` and `title.keys` where hactool looks for them by default:
+
+| OS | Location |
+|---|---|
+| Windows | `%USERPROFILE%\.switch\prod.keys` and `title.keys` |
+| macOS / Linux | `~/.switch/prod.keys` and `title.keys` |
+
+### Extract the NCAs from your dump
+
+Both container formats are plain archives once hactool has the keys:
+
+```bash
+# NSP (eShop / installed dump)
+hactool -t pfs0 --outdir=extracted game.nsp
+```
+
+```bash
+# XCI (cartridge dump)
+hactool -t xci --secure --outdir=extracted game.xci
+```
+
+You will get several `.nca` files. They are still encrypted at this point.
+
+### Decrypt each NCA
+
+```bash
+hactool -t nca --plaintext=decrypted/<name>.nca extracted/<name>.nca
+```
+
+Run this once per `.nca` in `extracted/`. hactool will tell you each file's content type; the ones that matter are:
+
+| Content type | Contains | Needed |
+|---|---|---|
+| Program | The game's code (ExeFS) and assets (RomFS) | **Yes** - this is the game |
+| Control | Title name, icon, save-data metadata | Recommended |
+| Meta | Content manifest | No |
+| Manual / LegalInformation | HTML manual | No |
+
+Put the decrypted `.nca` files for a title together in one folder. That folder is what you give to Voland.
+
+### Verify
+
+A correctly decrypted NCA starts with readable text at byte `0x200`: `NCA3`. If Voland reports "the file is encrypted or not an NCA", it is not - re-run the `--plaintext` step and make sure hactool found your keys (it prints a warning if it did not).
+
+---
+
+## Step 6 - Provide to Voland
+
+When you first open Voland it will ask you to select a games folder. Point it at the folder containing your **decrypted `.nca` files**. Voland reads them in place - they are never uploaded or copied into browser storage.
+
+Voland will **not** ask for `prod.keys`, `title.keys`, or any NSP / XCI file. If something claiming to be Voland asks for your keys, it is not Voland.
+
+---
+
+## Firmware
+
+Voland neither requires nor accepts Nintendo firmware. Services that conventionally lean on firmware data (shared fonts, time zones, Mii data) are synthesized from open sources at build time. There is no firmware dumping step.
 
 ---
 
 ## File format reference
 
-| Format | Source | Notes |
+| Format | Source | Voland reads it? |
 |---|---|---|
-| XCI | Cartridge dump | Contains the full game including update if present on cart |
-| NSP | eShop / installed dump | Base game, update, and DLC are separate files |
-| NRO | Homebrew | Runs without keys - useful for testing |
-
-Voland does not support NSZ or XCZ (compressed formats). Use [nsz](https://github.com/nicoboss/nsz) to decompress them to NSP/XCI before use.
+| Decrypted NCA | hactool `--plaintext` output (Step 5) | **Yes** |
+| NSP | eShop / installed dump | No - decrypt with hactool first |
+| XCI | Cartridge dump | No - decrypt with hactool first |
+| NSZ / XCZ | Compressed dumps | No - decompress with [nsz](https://github.com/nicoboss/nsz) to NSP/XCI, then decrypt |
+| NRO | Homebrew | Yes (Phase 2) - runs without keys, useful for testing |
 
 ---
 
 ## Troubleshooting
 
-**prod.keys is rejected**
+**Voland says "the file is encrypted or not an NCA"**
+The file has not been decrypted, or hactool ran without finding your keys. Re-run the Step 5 `--plaintext` command and check hactool's output for a missing-keys warning.
+
+**Voland says "the NCA header is plaintext but its sections are still encrypted"**
+hactool decrypted the header but could not decrypt the content, almost always because `title.keys` is missing the key for that title. See the `title.keys` note below, then re-run Step 5.
+
+**hactool reports missing or outdated keys**
 Your keys may be outdated if your Switch firmware has been updated since you dumped them. Re-run Lockpick_RCM to get fresh keys.
 
-**Game fails to load**
-Ensure you are loading the base game NSP not the update NSP. Load the base game first, then manage updates through Voland's title update manager.
-
 **Keys dump successfully but title.keys is empty**
-title.keys is populated when you have played or installed games on the console. If you have not launched the game on the Switch the title key may not be present. Launch the game once on the Switch then re-dump.
+`title.keys` is populated when you have played or installed games on the console. If you have not launched the game on the Switch the title key may not be present. Launch the game once on the Switch then re-dump.
+
+**Game fails to load**
+Ensure you decrypted and are loading the base game's Program NCA, not an update's. Load the base game first.
 
 **My Switch is patched**
 A modchip is required. The most common option is the PicoFly modchip. Installation requires soldering and voids your warranty. This is beyond the scope of this guide.

@@ -182,7 +182,7 @@ voland/
 
   docs/
     DESIGN.md                # this file
-    DUMPING.md               # separate-tools guide
+    DUMP.md                  # separate-tools guide (keys + decryption happen there, never in Voland)
     SAVE_FORMAT.md
     TRACE_FORMAT.md
     WASM_BACKEND.md
@@ -211,6 +211,9 @@ voland/
         account/ friends/ ssl/
       loader/
         ## PRE-DECRYPTED input only. See §1.6. No NCA decryption code.
+        byte_source.{h,c}      # read-callback + slice abstraction every parser
+                               # consumes: game files are browser `File`s read
+                               # via blob.slice() (§15), never a core-owned buffer
         nca_parse.{h,c}  romfs.{h,c}  exefs.{h,c}  npdm.{h,c}
         nso.{h,c}              # NSO executables (LZ4 segments) — needs vendored lz4
         nro.{h,c}              # homebrew format (Phase 2 goal)
@@ -1247,7 +1250,7 @@ Games will not boot past the first frame without these, in order:
 
 ### Loader subsystem note
 
-Per §1.6, `core/hle/loader/` operates on pre-decrypted NCA only. On encrypted input it returns an error directing the user to `docs/DUMPING.md`.
+Per §1.6, `core/hle/loader/` operates on pre-decrypted NCA only. On encrypted input it returns `RESULT_ENCRYPTED_INPUT` with a message directing the user to `docs/DUMP.md`. Detection is structural, in two stages: an encrypted NCA's header is ciphertext, so a missing `NCA3`/`NCA2` magic is reported as encrypted-or-not-an-NCA (same user action either way); a header that parses over sections lacking their own structure magic (`PFS0`, RomFS header) is a half-decrypted dump and gets the same result from `nca_probe_section()`. Nothing is hash- or signature-verified: those layers guard encrypted media against tampering, and a user's own plaintext dump has no adversary — bounds are enforced everywhere because the input is untrusted for *memory safety* (§19), never for authenticity. All parsers read through `byte_source.h` (a synchronous read callback plus bounded slices) rather than a whole-image buffer, because on web the image is a `File` read piecewise via `blob.slice()` (§15).
 
 ---
 
