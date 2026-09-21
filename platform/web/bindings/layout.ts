@@ -4,7 +4,7 @@
  * JS-side consumer reads the same ten uint64 fields back out of linear
  * memory rather than allocating its own shared buffers (§4).
  *
- * MEMORY64 makes every C `uint64_t` field and the pointer itself 64-bit;
+ * wasm64 (`-m64`) makes every C `uint64_t` field and the pointer itself 64-bit;
  * addresses are read as bigint throughout and only narrowed to Number at
  * the point a typed-array view is constructed (values here top out in the
  * low gigabytes, well inside Number.MAX_SAFE_INTEGER).

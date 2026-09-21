@@ -102,7 +102,7 @@ EXPORT uint64_t cpu_get_pc_ffi(void)
 
 /* Numeric backend id rather than marshalling `name`/`version` C strings
  * across the FFI boundary - platform/web/bindings/core.ts keeps the
- * matching display-name table. Sidesteps MEMORY64 string-pointer
+ * matching display-name table. Sidesteps wasm64 string-pointer
  * marshalling entirely for a value that is fixed at compile time anyway
  * (CPU_BACKEND is a CMake configure-time choice, never a runtime one). */
 EXPORT int cpu_backend_id_ffi(void)

@@ -1601,7 +1601,7 @@ async function boot(): Promise<void> {
   // ONE memory. Guest RAM lives inside it (§4). No separate SABs.
   //
   // Corrected against the shipped API (Phase 0 implementation, verified
-  // against both V8 and Emscripten's own -sMEMORY64=1 glue output): the
+  // against both V8 and Emscripten's own -m64 (wasm64) glue output): the
   // descriptor key is `address: "i64"` with BigInt page counts, not
   // `index: "i64"` with Number page counts as earlier drafts of this
   // section had it. `index` is silently ignored as an unrecognized
@@ -2172,7 +2172,7 @@ Flag spellings are pinned to what Emscripten 6.0.9 accepts without `-Wdeprecated
 | `-sWASM_BIGINT=1` | On by default, and mandatory under wasm64 (i64 addresses cross the JS boundary as BigInt). A no-op. |
 | `-sMAXIMUM_MEMORY=…` | With `ALLOW_MEMORY_GROWTH=0`, `INITIAL_MEMORY` *is* the maximum; emcc warns that a separate `MAXIMUM_MEMORY` is meaningless. The invariant it documented — memory fixed at boot, `initial === maximum`, views never detach — lives on the `INITIAL_MEMORY`/`ALLOW_MEMORY_GROWTH` lines and in §4. |
 
-Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), memory pinned to the full layout size with growth disabled, `MEMORY64` reclassified from Switch 2 prep to a Switch 1 requirement. Changes in v3.21: flag spellings modernized (see table).
+Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), memory pinned to the full layout size with growth disabled, memory64 reclassified from Switch 2 prep to a Switch 1 requirement. Changes in v3.21: flag spellings modernized (see table).
 
 ### Platform build targets
 
