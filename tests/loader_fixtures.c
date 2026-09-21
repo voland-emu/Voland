@@ -1,5 +1,7 @@
 #include "loader_fixtures.h"
 
+#include "third_party/lz4/lz4.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -388,6 +390,84 @@ void fixture_build_npdm(const Fixture_NPDM_Params *p, Fixture_Buffer *out) {
   fixture_put_le32(out->bytes + FIXTURE_NPDM_OFFSET_ACI0_SIZE, aci0_size);
   fixture_put_le32(out->bytes + FIXTURE_NPDM_OFFSET_ACID_OFFSET, acid_offset);
   fixture_put_le32(out->bytes + FIXTURE_NPDM_OFFSET_ACID_SIZE, acid_size);
+}
+
+/* ------------------------------------------------------------------ */
+/* NSO.                                                                */
+/* ------------------------------------------------------------------ */
+
+/* Appends the segment payload (raw or LZ4 block) and returns its file
+ * size; `file_offset` receives where it landed. */
+static uint32_t nso_append_segment(const Fixture_NSO_Segment *segment, Fixture_Buffer *out,
+                                   uint32_t *file_offset) {
+  if (!segment->compress) {
+    *file_offset = (uint32_t)fixture_append(out, segment->data, segment->size);
+    return (uint32_t)segment->size;
+  }
+  const int bound = LZ4_compressBound((int)segment->size);
+  char *compressed = (char *)malloc((size_t)bound + 1);
+  if (!compressed) fixture_fatal("out of memory");
+  const int compressed_size =
+      LZ4_compress_default((const char *)segment->data, compressed, (int)segment->size, bound);
+  if (compressed_size <= 0 && segment->size != 0) fixture_fatal("lz4 compression failed");
+  *file_offset = (uint32_t)fixture_append(out, compressed, (size_t)compressed_size);
+  free(compressed);
+  return (uint32_t)compressed_size;
+}
+
+static void nso_put_segment_header(uint8_t *header, uint32_t at, uint32_t file_offset,
+                                   const Fixture_NSO_Segment *segment) {
+  fixture_put_le32(header + at + 0x0, file_offset);
+  fixture_put_le32(header + at + 0x4, segment->memory_offset);
+  fixture_put_le32(header + at + 0x8, (uint32_t)segment->size);
+}
+
+void fixture_build_nso(const Fixture_NSO_Params *p, Fixture_Buffer *out) {
+  fixture_buffer_init(out);
+
+  /* Reserve the header; fill it once the payload offsets are known. */
+  fixture_append_zeros(out, FIXTURE_NSO_HEADER_SIZE);
+
+  const char *module_name = p->module_name ? p->module_name : "";
+  const uint32_t module_name_size = (uint32_t)strlen(module_name) + 1;
+  const uint32_t module_name_offset =
+      (uint32_t)fixture_append(out, module_name, module_name_size);
+
+  uint32_t text_offset, rodata_offset, data_offset;
+  const uint32_t text_file_size = nso_append_segment(&p->text, out, &text_offset);
+  const uint32_t rodata_file_size = nso_append_segment(&p->rodata, out, &rodata_offset);
+  const uint32_t data_file_size = nso_append_segment(&p->data, out, &data_offset);
+
+  uint8_t *header = out->bytes;
+  memcpy(header, "NSO0", 4);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_VERSION, 0);
+  uint32_t flags = p->extra_flags;
+  if (p->text.compress) flags |= FIXTURE_NSO_FLAG_TEXT_COMPRESSED;
+  if (p->rodata.compress) flags |= FIXTURE_NSO_FLAG_RODATA_COMPRESSED;
+  if (p->data.compress) flags |= FIXTURE_NSO_FLAG_DATA_COMPRESSED;
+  if (p->text.hash_flag) flags |= FIXTURE_NSO_FLAG_TEXT_HASH;
+  if (p->rodata.hash_flag) flags |= FIXTURE_NSO_FLAG_RODATA_HASH;
+  if (p->data.hash_flag) flags |= FIXTURE_NSO_FLAG_DATA_HASH;
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_FLAGS, flags);
+
+  nso_put_segment_header(header, FIXTURE_NSO_OFFSET_TEXT_SEGMENT, text_offset, &p->text);
+  nso_put_segment_header(header, FIXTURE_NSO_OFFSET_RODATA_SEGMENT, rodata_offset, &p->rodata);
+  nso_put_segment_header(header, FIXTURE_NSO_OFFSET_DATA_SEGMENT, data_offset, &p->data);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_MODULE_NAME_OFFSET, module_name_offset);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_MODULE_NAME_SIZE, module_name_size);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_BSS_SIZE, p->bss_size);
+  if (p->module_id) {
+    memcpy(header + FIXTURE_NSO_OFFSET_MODULE_ID, p->module_id, FIXTURE_NSO_MODULE_ID_SIZE);
+  }
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_TEXT_FILE_SIZE, text_file_size);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_RODATA_FILE_SIZE, rodata_file_size);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_DATA_FILE_SIZE, data_file_size);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_API_INFO, p->api_info_offset);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_API_INFO + 4, p->api_info_size);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_DYNSTR, p->dynstr_offset);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_DYNSTR + 4, p->dynstr_size);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_DYNSYM, p->dynsym_offset);
+  fixture_put_le32(header + FIXTURE_NSO_OFFSET_DYNSYM + 4, p->dynsym_size);
 }
 
 /* ------------------------------------------------------------------ */

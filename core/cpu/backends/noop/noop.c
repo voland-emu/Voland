@@ -18,6 +18,11 @@ typedef struct NoopState
   uint64_t fault_address;
   uint64_t cycles_consumed;
 
+  /* The one system register HLE writes today: the TLS block pointer the
+   * kernel sets at bootstrap and on every context switch (section 12).
+   * Kept so the plumbing is observable; every other encoding reads 0. */
+  uint64_t tpidrro_el0;
+
   VMM_Context *vmm; /* held per the §8 contract; the no-op backend never
                       * performs a guest memory access, so never walks it. */
   void *userdata;
@@ -95,15 +100,14 @@ static CPU_Register_File *noop_get_register_file(CPU_State *state)
 
 static uint64_t noop_get_sys_reg(CPU_State *state, uint32_t reg)
 {
-  (void)state;
-  (void)reg;
+  if (reg == CPU_SYSREG_TPIDRRO_EL0)
+    return ((NoopState *)state)->tpidrro_el0;
   return 0;
 }
 static void noop_set_sys_reg(CPU_State *state, uint32_t reg, uint64_t value)
 {
-  (void)state;
-  (void)reg;
-  (void)value;
+  if (reg == CPU_SYSREG_TPIDRRO_EL0)
+    ((NoopState *)state)->tpidrro_el0 = value;
 }
 
 static void noop_invalidate_cache(CPU_State *state, uint64_t addr, uint64_t size)

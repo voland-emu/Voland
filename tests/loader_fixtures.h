@@ -132,6 +132,59 @@ typedef struct Fixture_NPDM_Params {
 void fixture_build_npdm(const Fixture_NPDM_Params *params, Fixture_Buffer *out);
 
 /* ------------------------------------------------------------------ */
+/* NSO.                                                                */
+/* ------------------------------------------------------------------ */
+
+typedef struct Fixture_NSO_Segment {
+  const void *data; /* plaintext segment contents */
+  size_t size;
+  uint32_t memory_offset;
+  bool compress;    /* store as an LZ4 block (via the vendored compressor) */
+  bool hash_flag;   /* set the header's "check hash" bit; hash bytes are zero */
+} Fixture_NSO_Segment;
+
+typedef struct Fixture_NSO_Params {
+  Fixture_NSO_Segment text;
+  Fixture_NSO_Segment rodata;
+  Fixture_NSO_Segment data;
+  uint32_t bss_size;
+  const uint8_t *module_id;  /* 0x20 bytes, or NULL for zeros */
+  const char *module_name;   /* NULL = retail style: a lone NUL */
+  uint32_t extra_flags;      /* OR'd into the flags word (execute-only, zstd) */
+  uint32_t api_info_offset, api_info_size;
+  uint32_t dynstr_offset, dynstr_size;
+  uint32_t dynsym_offset, dynsym_size;
+} Fixture_NSO_Params;
+
+#define FIXTURE_NSO_HEADER_SIZE 0x100u
+#define FIXTURE_NSO_OFFSET_VERSION 0x04u
+#define FIXTURE_NSO_OFFSET_FLAGS 0x0Cu
+#define FIXTURE_NSO_OFFSET_TEXT_SEGMENT 0x10u
+#define FIXTURE_NSO_OFFSET_MODULE_NAME_OFFSET 0x1Cu
+#define FIXTURE_NSO_OFFSET_RODATA_SEGMENT 0x20u
+#define FIXTURE_NSO_OFFSET_MODULE_NAME_SIZE 0x2Cu
+#define FIXTURE_NSO_OFFSET_DATA_SEGMENT 0x30u
+#define FIXTURE_NSO_OFFSET_BSS_SIZE 0x3Cu
+#define FIXTURE_NSO_OFFSET_MODULE_ID 0x40u
+#define FIXTURE_NSO_OFFSET_TEXT_FILE_SIZE 0x60u
+#define FIXTURE_NSO_OFFSET_RODATA_FILE_SIZE 0x64u
+#define FIXTURE_NSO_OFFSET_DATA_FILE_SIZE 0x68u
+#define FIXTURE_NSO_OFFSET_API_INFO 0x88u
+#define FIXTURE_NSO_OFFSET_DYNSTR 0x90u
+#define FIXTURE_NSO_OFFSET_DYNSYM 0x98u
+#define FIXTURE_NSO_MODULE_ID_SIZE 0x20u
+#define FIXTURE_NSO_FLAG_TEXT_COMPRESSED 0x01u
+#define FIXTURE_NSO_FLAG_RODATA_COMPRESSED 0x02u
+#define FIXTURE_NSO_FLAG_DATA_COMPRESSED 0x04u
+#define FIXTURE_NSO_FLAG_TEXT_HASH 0x08u
+#define FIXTURE_NSO_FLAG_RODATA_HASH 0x10u
+#define FIXTURE_NSO_FLAG_DATA_HASH 0x20u
+
+/* Builds header | module name | .text payload | .rodata payload | .data
+ * payload. Segment file offsets are wherever the payloads land. */
+void fixture_build_nso(const Fixture_NSO_Params *params, Fixture_Buffer *out);
+
+/* ------------------------------------------------------------------ */
 /* NCA (plaintext).                                                    */
 /* ------------------------------------------------------------------ */
 

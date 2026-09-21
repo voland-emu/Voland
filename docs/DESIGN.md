@@ -201,6 +201,13 @@ voland/
       hle.h
       hle.c                  # syscall dispatch table
       kernel/
+        page_allocator.{h,c} # guest PHYSICAL page allocator over guest RAM (§4):
+                             # hands vmm_map its guest_pa; bump-only until the
+                             # memory HLE needs release
+        address_space.{h,c}  # Horizon region carve-up (code/alias/heap/stack/
+                             # tls_io) - the single source GetInfo answers from
+        process.{h,c}        # §12 bootstrap steps 2-4: map NSOs via vmm, stack,
+                             # TLS, main-thread entry ABI
         memory.{h,c}         # heap/MapMemory SVCs (thin layer over vmm)
         scheduler.{h,c}      # guest thread scheduler (§7)
         thread.{h,c}         # guest thread objects
@@ -215,7 +222,7 @@ voland/
                                # consumes: game files are browser `File`s read
                                # via blob.slice() (§15), never a core-owned buffer
         nca_parse.{h,c}  romfs.{h,c}  exefs.{h,c}  npdm.{h,c}
-        nso.{h,c}              # NSO executables (LZ4 segments) — needs vendored lz4
+        nso.{h,c}              # NSO executables (LZ4 segments) — uses third_party/lz4
         nro.{h,c}              # homebrew format (Phase 2 goal)
     gpu/
       gpu.h  gpu.c
@@ -243,6 +250,11 @@ voland/
       backends/  wasapi/ coreaudio/ pipewire/
       ## No webaudio backend directory: on web, the AudioWorkletProcessor
       ## reads the ring directly (§14); the C side only writes the ring.
+    third_party/
+      lz4/                   # THE ONLY third-party code in core/: upstream
+                             # lz4.{c,h} + LICENSE (BSD-2), pinned to a release
+                             # tag, built with allocation entry points compiled
+                             # out (§12, §26)
     common/
       arena.{h,c}            # arena allocator, no malloc in hot paths
       ring_buffer.{h,c}      # SPSC ring buffer (audio ring, GPU command ring)
@@ -2223,9 +2235,9 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 ### Phase 1 — Load & Memory
 
 - [x] **Softmmu** (`vmm.{h,c}`): page tables, map/unmap/reprotect/query, read/write, guest_to_host (§5)
-- [ ] Decrypted-NCA parsing (RomFS, ExeFS, npdm — no encryption handling per §1.6) + **NSO loader** (LZ4 segments) and process bootstrap per §12
-- [ ] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request
-- [ ] Load executable sections into guest memory *through vmm mappings*
+- [x] Decrypted-NCA parsing (RomFS, ExeFS, npdm — no encryption handling per §1.6) + **NSO loader** (LZ4 segments) and process bootstrap per §12
+- [ ] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request. *Partially landed with the bootstrap (v3.25): the main thread's TLS block is allocated from a process-owned TLS page and `tpidrro_el0` is set through the backend's sys-reg interface (`CPU_SYSREG_TPIDRRO_EL0`). Remaining: per-thread block allocation for CreateThread (`thread.{h,c}`) and IPC's use of the block.*
+- [x] Load executable sections into guest memory *through vmm mappings*
 - [ ] Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers
 - [ ] Minimal IPC + sm: stub
 - [ ] Input region + seqlock writer/reader (§18)
@@ -2306,7 +2318,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 ### Code review requirements
 
 - No merge without tests for HLE services
-- No C++ in core, no exceptions. Third-party code in core/ is exactly one file: vendored single-file LZ4 (BSD) for NSO segment decompression (§12)
+- No C++ in core, no exceptions. Third-party code in core/ is exactly one library: vendored upstream LZ4 (`core/third_party/lz4/lz4.{c,h}`, BSD-2, pinned to a release tag) for NSO segment decompression (§12), compiled with `LZ4_STATIC_LINKING_ONLY_DISABLE_MEMORY_ALLOCATION` so its object contains no allocator calls; only `LZ4_decompress_safe` is called from core
 - No `any` in TypeScript
 - All guest addresses are virtual unless the parameter says `guest_pa`; HLE memory access goes through vmm — reviewers reject direct guest-RAM pointer arithmetic outside `vmm.c`
 - No per-frame data over postMessage
@@ -2375,9 +2387,20 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.23.0*
+*Document version: 3.25.0*
 *Last updated: September 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.24 → v3.25 (summary)
+
+- **§12 process bootstrap implemented (closes the §25 Phase 1 loader checkbox and "load executable sections through vmm mappings").** `core/hle/kernel/` gains three units, each header-reviewed before implementation. **`page_allocator.{h,c}`**: guest *physical* page allocator over the layout's guest RAM - `vmm_map` needs a `guest_pa` and nothing handed them out; bump-only (nothing in bootstrap frees; a freelist lands with the memory HLE). **`address_space.{h,c}`**: the Horizon 39-bit carve-up (`code` at 128MB, then `alias` 64GB / `heap` 6GB / `stack` 2GB / `tls_io` 64GB back to back) as one struct - the "single source of truth" GetInfo will answer from; caller-seeded ASLR shifts the code base by 2MB granules, seed 0 = deterministic. **`process.{h,c}`**: steps 2-4 - opens the ExeFS NSOs in Horizon order (`rtld, main, subsdk0-9, sdk`; `main` mandatory), maps each image RW from freshly allocated pages, decompresses segments *straight into borrowed guest pages* inside a `vmm_borrow_scope` (the "section-copy pass" §5 provides for; no pointer arithmetic into guest RAM outside vmm), zeroes .bss, reprotects .text RX / .rodata R / .data+.bss RW, maps the npdm-sized main-thread stack behind an unmapped guard page and one TLS page, and `process_enter_main_thread` writes the Horizon entry ABI through the backend: X0 = 0, X1 = main thread handle, SP = stack top, PC = rtld's (or main's) .text base, `tpidrro_el0` = TLS block. Every failure unwinds its own mappings. `emulator_load_program(emu, nca, aslr_seed)` / `emulator_unload_program` run the whole path (NCA → ExeFS → npdm → bootstrap → armed `cpu_state`) with a per-call loader arena; the §1.6 encrypted-input message surfaces through it unchanged. `cpu.h` gains `CPU_SYSREG_ENCODE` (MRS/MSR field encoding) and `CPU_SYSREG_TPIDRRO_EL0`; the noop backend now stores that one register so the plumbing is observable. Tests: `tests/page_allocator_test.c`, `tests/address_space_test.c` (exact no-ASLR bases, invariants under seeds, fit limits), `tests/process_test.c` (four-module ExeFS; permissions asserted via `vmm_query`, bytes via `vmm_read_block`, zeroing over deliberately dirtied physical pages, entry ABI via the backend, ASLR, rollback on page exhaustion, missing `main`, corrupt NSO, 36-bit npdm, teardown-then-rebootstrap), `loader_smoke` extended through `emulator_load_program`. Verified: MSVC 19.51 13/13 ctest, zero diagnostics at `/W4 /WX`; GCC 16.2.1 (WSL) `-Werror` 13/13; mutation-checked (no text reprotect, no rollback, no image zeroing, no stack zeroing, X1 unset, wrong entry module) - tests fail on each.
+- **Bootstrap hardening from the post-landing test campaign** (disk-backed synthetic NCA through `emulator_load_program`, 30k mutation-fuzz iterations under ASan/UBSan with a full address-space walk after every rejected load, edge probes): two fixes. (1) `entry_point` was the image base; it is now the first module's `.text` base - identical for retail NSOs (`.text` at offset 0) but the image base is RW when `nso_open`'s permitted non-zero `.text` offset is used. (2) The main-thread stack is validated against `Address_Space.stack` before mapping (`INVALID_ARGUMENT`, "does not fit the stack region"); previously a region-sized stack spilled one page into `tls_io` and was rejected only because the TLS page happened to collide. Both have `process_test` cases. Observed and left as designed: a 0-byte *compressed* empty segment is rejected (LZ4 needs one token byte; real compressors emit it), and payload corruption that still decodes to the declared length loads silently (no hash verification, §12 loader note).
+- **§12 bootstrap deviations, stated:** (1) *region order under ASLR is fixed* (code, alias, heap, stack, tls_io); Horizon also shuffles the order. The guest learns bases only via GetInfo, so it cannot observe the difference, and a fixed order keeps a seed reproducible. (2) *Execute-only .text (NSO flag bit 6, firmware 20.0.0+) is mapped RX, not X*: the guest cannot tell without a fault it never takes, and X-only would forbid the interpreter's own fetches. (3) *36-bit and 32-bit address spaces* return `NOT_IMPLEMENTED` (every modern title is 39-bit). (4) The *main thread handle* is the constant `PROCESS_MAIN_THREAD_HANDLE` (0x8000: Horizon's `(linear_id << 15) | index` for the first entry); the Phase 2 handle table must issue exactly that entry to the main thread. (5) The bootstrap rewinds the shared scratch arena to an entry mark between segments by writing `used_bytes` directly (the ExeFS directory lives in the same arena, so `arena_reset` is off limits); a `arena_mark/arena_rewind` pair in `arena.h` is the tidy form and should land when a second caller needs it. (6) Tripwire hits, justified: `page_allocator.c` reads `guest_ram_size` for bounds only; `process.c` offsets a pointer *borrowed from vmm* within its scope.
+
+### Changelog v3.23 → v3.24 (summary)
+
+- **§12 NSO loader implemented (second part of the §25 Phase 1 loader checkbox; process bootstrap remains).** `core/hle/loader/nso.{h,c}`: header parse (`nso_open`) over a `byte_source`, per-segment decompression (`nso_read_segment`) into a caller buffer, and `nso_module_id_hex` for the §19 buildId form. The descriptor exposes the three segments (file/memory offset, file/memory size, compressed and hash flags), bss, the page-rounded `image_size` the bootstrap must reserve, the module id/name, the `.rodata` sub-sections (api_info/dynstr/dynsym), and the 20.0.0+ execute-only-text flag. Loading into guest memory, base-address choice and permissions are deliberately NOT here — they are the next checkbox ("through vmm mappings") and nso.h has no vmm dependency. Validation per §19 (memory safety, not authenticity): magic/version, segment file ranges, a 512MB size cap, raw-segment size equality, page-aligned and ascending non-overlapping segments, sub-sections inside `.rodata`; per-segment SHA-256 hashes are carried as flags and not verified (§12 loader note). The 22.0.0+ zstd ("zbic") flag is refused with `NOT_IMPLEMENTED` rather than mis-decoded as LZ4. **LZ4 vendored** as `core/third_party/lz4/` (upstream v1.10.0 `lz4.{c,h}` + LICENSE), built with `LZ4_STATIC_LINKING_ONLY_DISABLE_MEMORY_ALLOCATION` + `LZ4_HEAPMODE=0` so no allocator is linked; `-Wmissing-prototypes` relaxed for that one file (upstream defines one internal helper without a prototype). §2 and §26 updated to name the directory and the "one library" wording. Tests: `tests/nso_test.c` over `fixture_build_nso()` images (layout restated; segments compressed with the vendored compressor as the reference encoder) covering all compressed/raw flag mixes, round trips, twelve header rejections, read-side errors (arena exhaustion, malformed stream, declared/decoded length mismatch); `tests/loader_smoke.c` now composes NCA → ExeFS → NSO → decompressed `.text` and raw `.data`. Verified: MSVC 19.51 Debug 10/10 ctest, zero diagnostics at `/W4 /WX` including `lz4.c`; GCC 16.2.1 (WSL) `-Werror` 10/10; mutation-checked (magic check, decoded-length check, overlap check) — tests fail on each.
+- **Noted, not fixed (pre-existing):** `core/hle/loader/romfs.c:277` trips GCC `-Wcomment` (`/*` inside a comment). Harmless; the project does not build with `-Werror` by default.
 
 ### Changelog v3.22 → v3.23 (summary)
 
