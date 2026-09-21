@@ -6,6 +6,19 @@
 #ifndef SWITCH_COMMON_LOG_H
 #define SWITCH_COMMON_LOG_H
 
+/*
+ * printf-style format-string checking. A GCC/Clang extension; MSVC has no
+ * equivalent spelling in this position and rejects `__attribute__` as a
+ * syntax error, so it expands to nothing there. Diagnostic-only: no effect
+ * on ABI or behavior.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#  define SWITCH_PRINTF_FORMAT(format_index, first_arg_index) \
+     __attribute__((format(printf, format_index, first_arg_index)))
+#else
+#  define SWITCH_PRINTF_FORMAT(format_index, first_arg_index)
+#endif
+
 typedef enum Log_Level
 {
   LOG_LEVEL_TRACE = 0,
@@ -18,7 +31,7 @@ typedef enum Log_Level
 void log_set_minimum_level(Log_Level level);
 
 void log_message(Log_Level level, const char *format, ...)
-    __attribute__((format(printf, 2, 3)));
+    SWITCH_PRINTF_FORMAT(2, 3);
 
 #define log_trace(...) log_message(LOG_LEVEL_TRACE, __VA_ARGS__)
 #define log_debug(...) log_message(LOG_LEVEL_DEBUG, __VA_ARGS__)
