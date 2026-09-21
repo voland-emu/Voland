@@ -10,7 +10,7 @@
  * size_t is ever 32-bit, which would corrupt every region below it rather
  * than fail loudly. Every native target this project ships to (desktop,
  * iOS, macOS, Android, tvOS, visionOS) is 64-bit-only, and Emscripten's
- * size_t is 64-bit under -sMEMORY64=1 (§4) - so this is a real assumption,
+ * size_t is 64-bit under -m64 / wasm64 (§4) - so this is a real assumption,
  * not a hypothetical one, and it belongs here as a hard compile error. */
 _Static_assert(sizeof(size_t) >= 8,
                "layout.c requires a 64-bit size_t (guest RAM alone is 4GB); "

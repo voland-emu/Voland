@@ -3,9 +3,9 @@
     "cmake":      ">=3.24",
     "ninja":      ">=1.11",
     "clang":      ">=16",
-    "emscripten": ">=3.1.60",
+    "emscripten": ">=6.0.9",
     "node":       ">=22.6",
     "pnpm":       ">=9"
   },
-  "notes": "Minimum tool versions required to build Voland. Core is C11 strict. Node >=22.6 is required for --experimental-strip-types, used by `npm run test` to run platform/web/tests/unit/*.test.ts directly with no build step."
+  "notes": "Minimum tool versions required to build Voland. Core is C11 strict. Emscripten >=6.0.9 is the version the DESIGN.md §24 flag spellings (-m64, -pthread) are verified against; older releases are unsupported. Node >=22.6 is required for --experimental-strip-types, used by `npm run test` to run platform/web/tests/unit/*.test.ts directly with no build step."
 }

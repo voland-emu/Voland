@@ -39,7 +39,7 @@ Minimum tool versions are tracked in [`global.json`](global.json):
 | CMake | ≥3.24 |
 | Ninja | ≥1.11 |
 | Clang | ≥16 |
-| Emscripten (emsdk) | ≥3.1.60 |
+| Emscripten (emsdk) | ≥6.0.9 — the version the §24 flag spellings (`-m64`, `-pthread`) are verified against; older releases are unsupported and CMake refuses them |
 | Node.js | ≥22.6 (required for `--experimental-strip-types`, used by `npm run test`) |
 | pnpm | ≥9 |
 

@@ -55,25 +55,40 @@ message(STATUS "  Build type:    ${CMAKE_BUILD_TYPE}")
 # truncation.
 #
 if(EMSCRIPTEN)
-  # MEMORY64/pthreads change codegen (wasm64 target, shared-memory atomics),
+  # Minimum toolchain (mirrors global.json). The flag spellings below are
+  # verified against 6.0.9; refuse older SDKs here rather than let them fail
+  # later with an opaque unknown-flag or wasm32/wasm64 link error.
+  set(VOLAND_MIN_EMSCRIPTEN_VERSION 6.0.9)
+  if(EMSCRIPTEN_VERSION VERSION_LESS VOLAND_MIN_EMSCRIPTEN_VERSION)
+    message(FATAL_ERROR
+      "Emscripten ${EMSCRIPTEN_VERSION} is too old; Voland requires "
+      ">= ${VOLAND_MIN_EMSCRIPTEN_VERSION} (see global.json). "
+      "Run: emsdk install latest && emsdk activate latest")
+  endif()
+
+  # wasm64/pthreads change codegen (wasm64 target, shared-memory atomics),
   # not just link behavior - they are REQUIRED on both the compile and link
   # lines, or object files come out wasm32 and linking fails outright
   # ("wasm32 object file can't be linked in wasm64 mode").
+  #
+  # Spellings are the ones emcc 6.0.9 accepts without -Wdeprecated:
+  # -m64 (not -sMEMORY64=1) and -pthread (not -sUSE_PTHREADS=1). Both are
+  # the standard Clang flags; the -s forms were emcc-only aliases.
   set(VOLAND_WASM_CODEGEN_FLAGS
     -msimd128                 # REQUIRED: NEON -> WASM SIMD; ~4x slowdown without
-    -sMEMORY64=1               # REQUIRED for Switch 1, not just Switch 2 (§4)
-    -sSHARED_MEMORY=1
-    -sUSE_PTHREADS=1
+    -m64                       # wasm64: REQUIRED for Switch 1, not just Switch 2 (§4)
+    -pthread                   # implies SHARED_MEMORY (shared-memory atomics)
+    -sSHARED_MEMORY=1          # redundant under -pthread; kept for explicitness
   )
   add_compile_options(${VOLAND_WASM_CODEGEN_FLAGS})
   add_link_options(
     ${VOLAND_WASM_CODEGEN_FLAGS}
     -sWASM=1
-    -sWASM_BIGINT=1
     -sIMPORTED_MEMORY=1        # host creates the single WebAssembly.Memory (§16)
-    -sINITIAL_MEMORY=5637144576   # ~5.25GB; must equal the host's initial
-    -sMAXIMUM_MEMORY=5637144576   # == INITIAL: growth disabled, views never detach
-    -sALLOW_MEMORY_GROWTH=0
+    -sINITIAL_MEMORY=5637144576   # ~5.25GB; must equal the host's initial; with
+                                  # growth disabled this IS the maximum, so no
+                                  # separate MAXIMUM_MEMORY - views never detach
+    -sALLOW_MEMORY_GROWTH=0       # fixed at boot (§4); never enable
     -sPTHREAD_POOL_SIZE=8
     -sMODULARIZE=1             # emits a factory function, not a self-executing script
     -sEXPORT_ES6=1             # ...as an ES module, so cpu.worker.ts can `import()` it

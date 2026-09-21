@@ -99,7 +99,7 @@ The WASM JIT pipeline - ARM bytecode → WASM bytecode → `WebAssembly.compile(
 
 - CMake 3.16+
 - C11 compiler (GCC 12+, Clang 15+, MSVC 2022+)
-- For web: Emscripten SDK
+- For web: Emscripten SDK ≥6.0.9 (see [`global.json`](global.json) for all minimum tool versions)
 - For dynarmic backend: see `externals/dynarmic/`
 
 ### Web (requires Emscripten)

@@ -21,7 +21,8 @@ import { appendLogLine, setStatus } from "./log";
  * Total shared linear memory: guest RAM + every layout.h region +
  * Emscripten's own data/stack/heap (~5.25GiB). Fixed at boot -
  * `initial === maximum`, growth disabled, so views never detach (§4).
- * This MUST equal CMakeLists.txt's INITIAL_MEMORY/MAXIMUM_MEMORY in bytes
+ * This MUST equal CMakeLists.txt's INITIAL_MEMORY in bytes (with growth
+ * disabled it is also the maximum; there is no separate MAXIMUM_MEMORY)
  * (5_637_144_576) or the core module fails to instantiate.
  */
 const WASM_PAGE_BYTES = 65_536n;
@@ -70,7 +71,7 @@ interface Memory64Descriptor {
 
 function allocateSharedMemory(): WebAssembly.Memory | null {
   // Verified directly against this environment's V8 and against
-  // Emscripten's own -sMEMORY64=1 glue output: both use `address: "i64"`
+  // Emscripten's own -m64 (wasm64) glue output: both use `address: "i64"`
   // with BigInt page counts, NOT `index: "i64"` with Number page counts.
   // The latter is silently accepted as an unrecognized property and falls
   // back to an ordinary 32-bit memory, which then throws RangeError the

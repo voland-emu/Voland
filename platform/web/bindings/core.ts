@@ -6,8 +6,9 @@
  * the real core functions take an `Emulator*` the JS side has no way to
  * name; each wrapper operates on the module-global instance instead.
  *
- * MEMORY64 + WASM_BIGINT means every pointer-or-uint64-typed export
- * exchanges `bigint`, never `number`, at the WASM boundary.
+ * wasm64 (`-m64`, §24) means every pointer-or-uint64-typed export
+ * exchanges `bigint`, never `number`, at the WASM boundary - i64 crosses
+ * the JS boundary as BigInt, which is mandatory under wasm64.
  */
 
 export interface SwitchCoreExports {
@@ -27,7 +28,7 @@ export interface SwitchCoreExports {
 /* Mirrors the #if ladder in core/stubs/wasm_entry.c's cpu_backend_id_ffi -
  * CPU_BACKEND is a CMake configure-time choice, never a runtime one, so
  * this sidesteps marshalling the backend's `name`/`version` C strings
- * across the MEMORY64 FFI boundary for a value fixed at build time. */
+ * across the wasm64 FFI boundary for a value fixed at build time. */
 export const enum CpuBackendId {
   Noop = 0,
   Interpreter = 1,
