@@ -73,6 +73,15 @@ adjacent.
 - **Nothing is done until CI proves it.** "It should work" is not a status.
   The browser smoke test must pass for any change touching `platform/web/`
   or Emscripten flags.
+- **Keep the README's status current.** Whenever a DESIGN.md §25 checkbox
+  is ticked, a phase opens or closes, or a backend's status in the
+  README table changes, update the `> **Status:**` block in `README.md`
+  in the same PR. It is the first thing a newcomer reads; a stale status
+  causes more confusion than no status at all.
+- **README status is brief but explanatory.** Under 5 sentences,
+  ideally about 3: which phase we are in, what has landed, what is next,
+  and what does not work yet. Link to DESIGN.md §25 for the full list
+  instead of repeating it.
 - One task per branch. Conventional commits (`feat(vmm): ...`,
   `test(hle): ...`). PR description: what, which DESIGN.md sections govern
   it, how it was verified.

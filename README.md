@@ -4,7 +4,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development. The CPU backend interface, no-op backend, and proof-of-concept are in progress. Nothing runs yet.
+> **Status:** Early development — **Phase 1 (Load & Memory)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 0 (skeleton) is complete: the linear-memory layout, no-op CPU backend, SVC/HLE dispatcher stub, and web boot path (single shared memory, COOP/COEP, Workers) all build and pass CI natively and under Emscripten. The first Phase 1 deliverable, the softmmu (`core/common/vmm`), has landed; NCA/NSO loading, TLS, memory HLE, and the sm: stub are next. Nothing executes guest code yet — the interpreter is a Phase 2 goal.
 
 ---
 
