@@ -2192,9 +2192,9 @@ flowchart LR
 - [x] Web scaffolding: single-memory boot sequence, CPU worker instantiates core, layout handshake (§16)
 - [x] COOP/COEP + SW reload path working end-to-end
 
-Build-verified: both the `native-noop` and `web` presets configure, compile, and (for `native-noop`) pass `ctest` under GCC 16.2.1 and Emscripten 6.0.9/Clang respectively (verified on Linux/WSL). `web` produces `switch_core.{js,wasm}`; `cpu.worker.ts` still fails loudly with a real error (rather than a fake "ready") until those files are copied to `platform/web/public/core/` - that copy step is still manual, not wired into CI - see the worker's header comment for the exact build + copy steps.
+Build-verified: both the `native-noop` and `web` presets configure, compile, and (for `native-noop`) pass `ctest` under GCC 16.2.1 and Emscripten 6.0.9/Clang respectively (verified on Linux/WSL), and `native-noop` additionally builds and passes `ctest` under MSVC 19.51 (Visual Studio Build Tools 2026, Ninja) on Windows. `web` produces `switch_core.{js,wasm}`; `cpu.worker.ts` still fails loudly with a real error (rather than a fake "ready") until those files are copied to `platform/web/public/core/` - that copy step is still manual, not wired into CI - see the worker's header comment for the exact build + copy steps.
 
-**Known issue - native build fails under MSVC:** `core/common/log.h` declares `log_message` with an unconditional `__attribute__((format(printf, 2, 3)))`, a GCC/Clang-only extension with no guard for other compilers. This is a hard compile error under MSVC (`cl.exe`, Visual Studio Build Tools), breaking every translation unit that includes `log.h` (7 of 12 in `native-noop`). Not yet fixed; fix requires a `core/**/*.h` change and so goes through the interface-header-review workflow before landing. GCC and Clang (including emcc) are unaffected - `__attribute__` is native to both.
+**Compiler-portability rule (resolved MSVC build break):** `core/` is compiled by GCC, Clang (via emcc), and MSVC. Any GCC/Clang-only extension (`__attribute__`, `__builtin_*`, statement expressions, etc.) must be wrapped in a guarded macro that expands to nothing on compilers that lack it; an unguarded extension is a hard `cl.exe` syntax error, not an ignorable warning. The first instance was `log_message`'s `__attribute__((format(printf, 2, 3)))`, which broke 7 of 12 `native-noop` translation units under MSVC; it is now `SWITCH_PRINTF_FORMAT(2, 3)`, defined in `core/common/log.h` under `#if defined(__GNUC__) || defined(__clang__)`. The attribute is diagnostic-only (format-string checking), so MSVC builds lose that one warning class and nothing else - no ABI or behavior difference. `SWITCH_PRINTF_FORMAT` lives inline in `log.h` for now; if a second portable-attribute macro is needed, move both into a shared `core/common/compiler.h` rather than defining a second inline.
 
 ### Phase 1 — Load & Memory
 
@@ -2351,9 +2351,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.19.0*
-*Last updated: July 2026*
+*Document version: 3.20.0*
+*Last updated: September 2026*
 *Maintained by: proxy-alt*
+
+### Changelog v3.19 → v3.20 (summary)
+
+- **§25 MSVC build break fixed, verified against a real toolchain:** `core/common/log.h` no longer applies `__attribute__((format(printf, 2, 3)))` unconditionally; it goes through a new `SWITCH_PRINTF_FORMAT(format_index, first_arg_index)` macro guarded on `__GNUC__`/`__clang__` and empty elsewhere. `native-noop` now configures, builds all 12 translation units, and passes `ctest` (2/2) under MSVC 19.51 / VS Build Tools 2026; GCC 16.2.1 and Emscripten 6.0.9 re-verified with no regression, and a deliberate mismatched-format probe confirms `-Wformat` checking still fires under GCC through the macro. The §25 "Known issue" paragraph is replaced by a standing compiler-portability rule for `core/`. Not changed in this revision: the §24 Emscripten flag list still uses `-sUSE_PTHREADS`, `-sMEMORY64`, and `-sWASM_BIGINT` spellings that emcc 6.0.9 reports as deprecated (modern equivalents `-pthread`, `-m64`, and dropping `WASM_BIGINT`), plus a `MAXIMUM_MEMORY`-without-growth notice; these are warnings only and are deferred to a separate §24 revision.
 
 ### Changelog v3.18 → v3.19 (summary)
 
