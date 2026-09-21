@@ -35,7 +35,7 @@ Check your serial number at [ismyswitchpatched.com](https://ismyswitchpatched.co
 Switch Lite and Switch OLED require a modchip regardless of serial number unless a software exploit has been discovered for your firmware version.
 
 ---
-
+ 
 ## Step 2 - Set up custom firmware
 
 Follow the [NH Switch Guide](https://switch.hacks.guide/) - the most maintained and accurate CFW setup guide available.
