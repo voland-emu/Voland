@@ -4,13 +4,13 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development — **Phase 1 (Load & Memory)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 0 (skeleton) is complete: the linear-memory layout, no-op CPU backend, SVC/HLE dispatcher stub, and web boot path (single shared memory, COOP/COEP, Workers) all build and pass CI natively and under Emscripten. The first Phase 1 deliverable, the softmmu (`core/common/vmm`), has landed; NCA/NSO loading, TLS, memory HLE, and the sm: stub are next. Nothing executes guest code yet — the interpreter is a Phase 2 goal.
+> **Status:** Early development — **Phase 1 (Load & Memory)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 0 (skeleton) is complete: the linear-memory layout, no-op CPU backend, SVC/HLE dispatcher stub, and web boot path (single shared memory, COOP/COEP, Workers) all build and pass CI natively and under Emscripten. The softmmu (`core/common/vmm`) and the decrypted-NCA parsers (`core/hle/loader`: NCA container, ExeFS, RomFS, npdm — pre-decrypted input only, per §1.6) have landed; the NSO loader and process bootstrap complete that checkbox next, followed by TLS, memory HLE, and the sm: stub. Nothing executes guest code yet — the interpreter is a Phase 2 goal.
 
 ---
 
 ## Why web-first
 
-Every existing Switch emulator requires installation, driver configuration, and technical setup that eliminates most potential users before they ever reach a game. Voland's primary target is a browser tab - click a link, provide your keys and game files, play.
+Every existing Switch emulator requires installation, driver configuration, and technical setup that eliminates most potential users before they ever reach a game. Voland's primary target is a browser tab - click a link, provide your decrypted game files, play.
 
 The web version is not a port of a native emulator. It is designed from the ground up for the browser, using a WASM-compiled C core, WebGPU rendering, SharedArrayBuffer for guest RAM, and a dedicated Worker per emulator subsystem.
 
@@ -25,7 +25,7 @@ To play games you must provide:
 - **prod.keys** - cryptographic keys dumped from your own Nintendo Switch using [Lockpick_RCM](https://github.com/s1204IT/Lockpick_RCM)
 - **Game files** - NSP or XCI files dumped from cartridges or digital purchases you own
 
-Voland does not and will never distribute keys, firmware, or game files. These must come from hardware you own. See the [dumping guide](docs/DUMPING.md) for instructions.
+Voland does not and will never distribute keys, firmware, or game files. These must come from hardware you own. See the [dumping guide](docs/DUMP.md) for instructions.
 
 ---
 
@@ -196,7 +196,7 @@ Note: dynarmic is archived and no longer builds cleanly on GCC 14 without patchi
 
 Voland is open source software released under the [GPL-2.0 license](LICENSE).
 
-Voland does not include, distribute, or facilitate obtaining Nintendo's copyrighted material. prod.keys, firmware, and game files must be provided by the user from hardware they own. Forks or distributions that bundle Nintendo's IP are not affiliated with this project and are solely responsible for their own legal compliance.
+Voland does not include, distribute, or facilitate obtaining Nintendo's copyrighted material. Game files must be dumped and decrypted by the user, with separate tools, from hardware they own; Voland accepts only the resulting decrypted NCA files and never consumes keys or firmware (see [DESIGN.md §1.6](docs/DESIGN.md#16-legal-scope-boundaries)). Forks or distributions that bundle Nintendo's IP are not affiliated with this project and are solely responsible for their own legal compliance.
 
 Voland is not affiliated with Nintendo Co., Ltd.
 

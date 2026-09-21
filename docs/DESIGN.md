@@ -182,7 +182,7 @@ voland/
 
   docs/
     DESIGN.md                # this file
-    DUMPING.md               # separate-tools guide
+    DUMP.md                  # separate-tools guide (keys + decryption happen there, never in Voland)
     SAVE_FORMAT.md
     TRACE_FORMAT.md
     WASM_BACKEND.md
@@ -211,6 +211,9 @@ voland/
         account/ friends/ ssl/
       loader/
         ## PRE-DECRYPTED input only. See §1.6. No NCA decryption code.
+        byte_source.{h,c}      # read-callback + slice abstraction every parser
+                               # consumes: game files are browser `File`s read
+                               # via blob.slice() (§15), never a core-owned buffer
         nca_parse.{h,c}  romfs.{h,c}  exefs.{h,c}  npdm.{h,c}
         nso.{h,c}              # NSO executables (LZ4 segments) — needs vendored lz4
         nro.{h,c}              # homebrew format (Phase 2 goal)
@@ -1247,7 +1250,7 @@ Games will not boot past the first frame without these, in order:
 
 ### Loader subsystem note
 
-Per §1.6, `core/hle/loader/` operates on pre-decrypted NCA only. On encrypted input it returns an error directing the user to `docs/DUMPING.md`.
+Per §1.6, `core/hle/loader/` operates on pre-decrypted NCA only. On encrypted input it returns `RESULT_ENCRYPTED_INPUT` with a message directing the user to `docs/DUMP.md`. Detection is structural, in two stages: an encrypted NCA's header is ciphertext, so a missing `NCA3`/`NCA2` magic is reported as encrypted-or-not-an-NCA (same user action either way); a header that parses over sections lacking their own structure magic (`PFS0`, RomFS header) is a half-decrypted dump and gets the same result from `nca_probe_section()`. Nothing is hash- or signature-verified: those layers guard encrypted media against tampering, and a user's own plaintext dump has no adversary — bounds are enforced everywhere because the input is untrusted for *memory safety* (§19), never for authenticity. All parsers read through `byte_source.h` (a synchronous read callback plus bounded slices) rather than a whole-image buffer, because on web the image is a `File` read piecewise via `blob.slice()` (§15).
 
 ---
 
@@ -2372,9 +2375,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.21.0*
+*Document version: 3.23.0*
 *Last updated: September 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.22 → v3.23 (summary)
+
+- **§12 decrypted-NCA parsing implemented (first half of the §25 Phase 1 loader checkbox; NSO loader + process bootstrap remain).** `core/hle/loader/` gains `nca_parse`, `exefs` (PFS0), `romfs`, and `npdm` per §2, plus **`byte_source.{h,c}`** (new in §2): a synchronous read-callback + bounded-slice abstraction every parser consumes, because on web the image is a browser `File` read piecewise via `blob.slice()` (§15), never a core-owned buffer. Per §1.6: no cipher, no key material, no key derivation; the parser never addresses the header's key area (`0x300`), RightsId, KeyGeneration, or signatures, and the FsHeader encryption-type byte is carried as a raw diagnostic value only. `RESULT_ENCRYPTED_INPUT` added to `result.h`; detection is structural in two stages (header magic; per-section `PFS0` / RomFS-header probe via `nca_probe_section()`) and the message names `docs/DUMP.md`. No hash or signature verification (rationale in §12 loader note); bounds enforced everywhere for memory safety (§19). Patch/sparse/compressed section layouts parse at header level and report `NOT_IMPLEMENTED` on access. Tests: `tests/{byte_source,exefs,romfs,npdm,nca_parse}_test.c` over synthesized images from `tests/loader_fixtures.c` (layout restated independently of the parsers), plus `tests/loader_smoke.c` composing NCA → ExeFS → npdm and NCA → RomFS → file. Verified: MSVC 19.51 Debug, 9/9 ctest, zero diagnostics at `/W4 /WX`; mutation-checked (RomFS hash rotation, NCA magic check) — tests fail on either.
+- **§2:** `docs/DUMPING.md` corrected to `docs/DUMP.md`. **`docs/DUMP.md` rewritten** to match §1.6: keys and NSP/XCI go to hactool on the user's PC (new decrypt-to-NCA step), Voland receives decrypted NCA only, no firmware step; the two loader error messages are documented in troubleshooting. README's keys wording brought in line.
 
 ### Changelog v3.21 → v3.22 (summary)
 

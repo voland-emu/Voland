@@ -8,6 +8,11 @@ set(SWITCH_CORE_SOURCES
   cpu/cpu.c
   cpu/backends/noop/noop.c
   hle/hle.c
+  hle/loader/byte_source.c
+  hle/loader/nca_parse.c
+  hle/loader/exefs.c
+  hle/loader/romfs.c
+  hle/loader/npdm.c
   emulator.c
 )
 
@@ -21,6 +26,11 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   cpu/cpu.h
   cpu/backends/noop/noop.h
   hle/hle.h
+  hle/loader/byte_source.h
+  hle/loader/nca_parse.h
+  hle/loader/exefs.h
+  hle/loader/romfs.h
+  hle/loader/npdm.h
   emulator.h
 )
 
