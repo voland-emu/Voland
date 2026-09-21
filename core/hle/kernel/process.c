@@ -217,13 +217,24 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
              (unsigned long long)(module->image_size / 1024));
   }
   out->code_bytes_mapped = code_size;
-  /* rtld is index 0 when present (load order is fixed). */
-  out->entry_point = out->modules[0].base_gva;
+  /* rtld is index 0 when present (load order is fixed). Enter at its
+   * .text, not the image base: nso_open allows a page-aligned non-zero
+   * .text offset, and the image base is RW there. */
+  out->entry_point = out->modules[0].text.base;
 
   /* Step 4a: main-thread stack behind a guard page. */
   out->main_thread_stack.base =
       out->address_space.stack.base + PROCESS_STACK_GUARD_PAGES * VMM_PAGE_SIZE;
   out->main_thread_stack.size = npdm->main_thread_stack_size;
+  /* Validate against the layout, not against vmm: a stack that spills
+   * past the stack region would otherwise fail only if something else
+   * happens to be mapped there. */
+  if (!address_region_contains(&out->address_space.stack, out->main_thread_stack.base,
+                               out->main_thread_stack.size)) {
+    err = ERR(RESULT_INVALID_ARGUMENT,
+              "process_bootstrap: main thread stack does not fit the stack region");
+    goto fail;
+  }
   err = map_fresh_rw(params->vmm, params->pages, &mapped, out->main_thread_stack.base,
                      out->main_thread_stack.size);
   if (!error_is_ok(err)) goto fail;

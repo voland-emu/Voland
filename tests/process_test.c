@@ -352,6 +352,55 @@ int main(void) {
   bad.npdm = &npdm_bad_stack;
   CHECK_CODE(process_bootstrap(&bad, &process), RESULT_INVALID_ARGUMENT);
 
+  /* A stack the size of the whole stack region cannot fit behind its
+   * guard page: rejected against the layout, before any mapping, with the
+   * modules already mapped and then unwound. */
+  npdm_bad_stack.main_thread_stack_size = (uint32_t)ADDRESS_SPACE_39_STACK_SIZE;
+  {
+    const Error err = process_bootstrap(&bad, &process);
+    CHECK_CODE(err, RESULT_INVALID_ARGUMENT);
+    CHECK(strstr(err.message, "stack region") != NULL);
+  }
+  expect_unmapped(emu.vmm, ADDRESS_SPACE_39_START);
+  CHECK(process.module_count == 0);
+
+  /* A module whose .text sits at a non-zero (page-aligned) offset: the
+   * entry point is the .text base, which is executable - not the RW
+   * image base. */
+  {
+    static uint8_t offset_text[0x300];
+    for (size_t i = 0; i < sizeof(offset_text); i++) offset_text[i] = (uint8_t)(0x77 + i);
+    Fixture_NSO_Params p;
+    memset(&p, 0, sizeof(p));
+    p.text = (Fixture_NSO_Segment){offset_text, sizeof(offset_text), PAGE, true, false};
+    p.rodata = (Fixture_NSO_Segment){"", 0, 2 * PAGE, false, false};
+    p.data = (Fixture_NSO_Segment){g_data[0], 0x10, 2 * PAGE, false, false};
+    Fixture_Buffer offset_nso;
+    fixture_build_nso(&p, &offset_nso);
+    const Fixture_File files[] = {
+        {EXEFS_FILE_NPDM, g_npdm_image.bytes, g_npdm_image.size},
+        {EXEFS_FILE_MAIN, offset_nso.bytes, offset_nso.size},
+    };
+    Fixture_Buffer offset_image;
+    fixture_build_pfs0(files, 2, &offset_image);
+    Byte_Source offset_source = byte_source_from_memory(offset_image.bytes, offset_image.size);
+    ExeFS offset_exefs;
+    CHECK_OK(exefs_open(&offset_source, &exefs_arena, &offset_exefs));
+    Process_Bootstrap_Params offset_params = params;
+    offset_params.exefs = &offset_exefs;
+    CHECK_OK(process_bootstrap(&offset_params, &process));
+    CHECK(process.modules[0].text.base == process.modules[0].base_gva + PAGE);
+    CHECK(process.entry_point == process.modules[0].text.base);
+    expect_run(emu.vmm, process.entry_point, PAGE, VMM_PERM_RX);
+    expect_run(emu.vmm, process.modules[0].base_gva, PAGE, VMM_PERM_RW); /* the hole before .text */
+    CHECK_OK(process_enter_main_thread(&process, cpu, emu.cpu_state));
+    CHECK(cpu->get_pc(emu.cpu_state) == process.modules[0].base_gva + PAGE);
+    process_teardown(&process, emu.vmm);
+    page_allocator_reset(&emu.pages);
+    fixture_buffer_free(&offset_image);
+    fixture_buffer_free(&offset_nso);
+  }
+
   /* Still bootstrappable after all of that: nothing leaked into vmm. */
   CHECK_OK(process_bootstrap(&params, &process));
   check_bootstrapped(&process, emu.vmm, SPEC_COUNT, ADDRESS_SPACE_39_START);
