@@ -215,7 +215,7 @@ voland/
                                # consumes: game files are browser `File`s read
                                # via blob.slice() (§15), never a core-owned buffer
         nca_parse.{h,c}  romfs.{h,c}  exefs.{h,c}  npdm.{h,c}
-        nso.{h,c}              # NSO executables (LZ4 segments) — needs vendored lz4
+        nso.{h,c}              # NSO executables (LZ4 segments) — uses third_party/lz4
         nro.{h,c}              # homebrew format (Phase 2 goal)
     gpu/
       gpu.h  gpu.c
@@ -243,6 +243,11 @@ voland/
       backends/  wasapi/ coreaudio/ pipewire/
       ## No webaudio backend directory: on web, the AudioWorkletProcessor
       ## reads the ring directly (§14); the C side only writes the ring.
+    third_party/
+      lz4/                   # THE ONLY third-party code in core/: upstream
+                             # lz4.{c,h} + LICENSE (BSD-2), pinned to a release
+                             # tag, built with allocation entry points compiled
+                             # out (§12, §26)
     common/
       arena.{h,c}            # arena allocator, no malloc in hot paths
       ring_buffer.{h,c}      # SPSC ring buffer (audio ring, GPU command ring)
@@ -2306,7 +2311,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 ### Code review requirements
 
 - No merge without tests for HLE services
-- No C++ in core, no exceptions. Third-party code in core/ is exactly one file: vendored single-file LZ4 (BSD) for NSO segment decompression (§12)
+- No C++ in core, no exceptions. Third-party code in core/ is exactly one library: vendored upstream LZ4 (`core/third_party/lz4/lz4.{c,h}`, BSD-2, pinned to a release tag) for NSO segment decompression (§12), compiled with `LZ4_STATIC_LINKING_ONLY_DISABLE_MEMORY_ALLOCATION` so its object contains no allocator calls; only `LZ4_decompress_safe` is called from core
 - No `any` in TypeScript
 - All guest addresses are virtual unless the parameter says `guest_pa`; HLE memory access goes through vmm — reviewers reject direct guest-RAM pointer arithmetic outside `vmm.c`
 - No per-frame data over postMessage
@@ -2375,9 +2380,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.23.0*
+*Document version: 3.24.0*
 *Last updated: September 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.23 → v3.24 (summary)
+
+- **§12 NSO loader implemented (second part of the §25 Phase 1 loader checkbox; process bootstrap remains).** `core/hle/loader/nso.{h,c}`: header parse (`nso_open`) over a `byte_source`, per-segment decompression (`nso_read_segment`) into a caller buffer, and `nso_module_id_hex` for the §19 buildId form. The descriptor exposes the three segments (file/memory offset, file/memory size, compressed and hash flags), bss, the page-rounded `image_size` the bootstrap must reserve, the module id/name, the `.rodata` sub-sections (api_info/dynstr/dynsym), and the 20.0.0+ execute-only-text flag. Loading into guest memory, base-address choice and permissions are deliberately NOT here — they are the next checkbox ("through vmm mappings") and nso.h has no vmm dependency. Validation per §19 (memory safety, not authenticity): magic/version, segment file ranges, a 512MB size cap, raw-segment size equality, page-aligned and ascending non-overlapping segments, sub-sections inside `.rodata`; per-segment SHA-256 hashes are carried as flags and not verified (§12 loader note). The 22.0.0+ zstd ("zbic") flag is refused with `NOT_IMPLEMENTED` rather than mis-decoded as LZ4. **LZ4 vendored** as `core/third_party/lz4/` (upstream v1.10.0 `lz4.{c,h}` + LICENSE), built with `LZ4_STATIC_LINKING_ONLY_DISABLE_MEMORY_ALLOCATION` + `LZ4_HEAPMODE=0` so no allocator is linked; `-Wmissing-prototypes` relaxed for that one file (upstream defines one internal helper without a prototype). §2 and §26 updated to name the directory and the "one library" wording. Tests: `tests/nso_test.c` over `fixture_build_nso()` images (layout restated; segments compressed with the vendored compressor as the reference encoder) covering all compressed/raw flag mixes, round trips, twelve header rejections, read-side errors (arena exhaustion, malformed stream, declared/decoded length mismatch); `tests/loader_smoke.c` now composes NCA → ExeFS → NSO → decompressed `.text` and raw `.data`. Verified: MSVC 19.51 Debug 10/10 ctest, zero diagnostics at `/W4 /WX` including `lz4.c`; GCC 16.2.1 (WSL) `-Werror` 10/10; mutation-checked (magic check, decoded-length check, overlap check) — tests fail on each.
+- **Noted, not fixed (pre-existing):** `core/hle/loader/romfs.c:277` trips GCC `-Wcomment` (`/*` inside a comment). Harmless; the project does not build with `-Werror` by default.
 
 ### Changelog v3.22 → v3.23 (summary)
 

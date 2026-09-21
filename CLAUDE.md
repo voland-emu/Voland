@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Voland: Nintendo Switch emulator, web-first (WASM/WebGPU), C11 core, thin
-platform layers. The authoritative design is `docs/DESIGN.md` (v3.23.0).
+platform layers. The authoritative design is `docs/DESIGN.md` (v3.24.0).
 Read §1 before any task. Read the section governing your task before
 writing code — section numbers are cited below.
 

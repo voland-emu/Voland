@@ -3,7 +3,9 @@
  * end to end over a synthesized PROGRAM NCA -
  *
  *   nca_open -> nca_probe_section -> exefs_open -> exefs_find(main.npdm)
- *            -> npdm_parse, and
+ *            -> npdm_parse,
+ *   nca_open -> nca_probe_section -> exefs_open -> exefs_entry_source(main)
+ *            -> nso_open -> nso_read_segment, and
  *   nca_open -> nca_probe_section -> romfs_open -> romfs_find_file.
  *
  * Each parser has its own unit test; this proves the seams between them
@@ -17,6 +19,7 @@
 #include "hle/loader/exefs.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/npdm.h"
+#include "hle/loader/nso.h"
 #include "hle/loader/romfs.h"
 #include "loader_fixtures.h"
 
@@ -28,7 +31,8 @@
 static const uint32_t k_caps[] = {0x7u | (44u << 4) | (28u << 10) | (0u << 16) | (2u << 24),
                                   0xFu | (0xFFu << 5)};
 static const char k_rtld[] = "rtld-bytes";
-static const char k_main[] = "main-bytes";
+static uint8_t k_main_text[0x1000 + 40];
+static const char k_main_data[] = "main-data-segment";
 static const char k_texture[] = "texture-bytes";
 
 int main(void) {
@@ -50,10 +54,21 @@ int main(void) {
   Fixture_Buffer npdm_image;
   fixture_build_npdm(&npdm_params, &npdm_image);
 
+  /* `main`: a real NSO with a compressed .text and a raw .data. */
+  for (size_t i = 0; i < sizeof(k_main_text); i++) k_main_text[i] = (uint8_t)(i % 17);
+  Fixture_NSO_Params nso_params;
+  memset(&nso_params, 0, sizeof(nso_params));
+  nso_params.text = (Fixture_NSO_Segment){k_main_text, sizeof(k_main_text), 0, true, true};
+  nso_params.rodata = (Fixture_NSO_Segment){"", 0, 0x2000, false, false};
+  nso_params.data = (Fixture_NSO_Segment){k_main_data, sizeof(k_main_data), 0x2000, false, false};
+  nso_params.bss_size = 0x100;
+  Fixture_Buffer main_nso_image;
+  fixture_build_nso(&nso_params, &main_nso_image);
+
   const Fixture_File exefs_files[] = {
       {EXEFS_FILE_NPDM, npdm_image.bytes, npdm_image.size},
       {EXEFS_FILE_RTLD, k_rtld, sizeof(k_rtld) - 1},
-      {EXEFS_FILE_MAIN, k_main, sizeof(k_main) - 1},
+      {EXEFS_FILE_MAIN, main_nso_image.bytes, main_nso_image.size},
   };
   Fixture_Buffer exefs_image;
   fixture_build_pfs0(exefs_files, 3, &exefs_image);
@@ -102,12 +117,22 @@ int main(void) {
   CHECK(npdm.program_id == nca.header.program_id);
   CHECK(npdm_svc_allowed(&npdm, 7) && !npdm_svc_allowed(&npdm, 8));
 
-  /* The NSOs are reachable as bounded sources for nso.h (next task). */
-  Byte_Source_Slice main_nso;
-  CHECK_OK(exefs_entry_source(&exefs, exefs_find(&exefs, EXEFS_FILE_MAIN), &main_nso));
-  char probe[16];
-  CHECK_OK(byte_source_read(&main_nso.source, 0, probe, main_nso.source.size));
-  CHECK(memcmp(probe, k_main, sizeof(k_main) - 1) == 0);
+  /* `main` through the ExeFS slice: header, then a decompressed segment
+   * staged in the shared arena, then a raw one. */
+  Byte_Source_Slice main_nso_source;
+  CHECK_OK(exefs_entry_source(&exefs, exefs_find(&exefs, EXEFS_FILE_MAIN), &main_nso_source));
+  NSO main_nso;
+  CHECK_OK(nso_open(&main_nso_source.source, &main_nso));
+  CHECK(main_nso.segments[NSO_SEGMENT_TEXT].is_compressed);
+  CHECK(main_nso.segments[NSO_SEGMENT_TEXT].memory_size == sizeof(k_main_text));
+  CHECK(main_nso.image_size == 0x3000);
+  uint8_t *text = ARENA_ALLOC_ARRAY(&arena, uint8_t, sizeof(k_main_text));
+  CHECK(text != NULL);
+  CHECK_OK(nso_read_segment(&main_nso, NSO_SEGMENT_TEXT, &arena, text, sizeof(k_main_text)));
+  CHECK(memcmp(text, k_main_text, sizeof(k_main_text)) == 0);
+  char probe[32];
+  CHECK_OK(nso_read_segment(&main_nso, NSO_SEGMENT_DATA, NULL, (uint8_t *)probe, sizeof(probe)));
+  CHECK(memcmp(probe, k_main_data, sizeof(k_main_data)) == 0);
 
   const int romfs_index = nca_find_section(&nca, NCA_FS_ROMFS);
   CHECK(romfs_index == 1);
@@ -135,6 +160,7 @@ int main(void) {
   fixture_buffer_free(&nca_image);
   fixture_buffer_free(&romfs_image);
   fixture_buffer_free(&exefs_image);
+  fixture_buffer_free(&main_nso_image);
   fixture_buffer_free(&npdm_image);
   printf("[loader_smoke] passed\n");
   return 0;
