@@ -8,6 +8,9 @@ set(SWITCH_CORE_SOURCES
   cpu/cpu.c
   cpu/backends/noop/noop.c
   hle/hle.c
+  hle/kernel/page_allocator.c
+  hle/kernel/address_space.c
+  hle/kernel/process.c
   hle/loader/byte_source.c
   hle/loader/nca_parse.c
   hle/loader/exefs.c
@@ -45,6 +48,9 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   cpu/cpu.h
   cpu/backends/noop/noop.h
   hle/hle.h
+  hle/kernel/page_allocator.h
+  hle/kernel/address_space.h
+  hle/kernel/process.h
   hle/loader/byte_source.h
   hle/loader/nca_parse.h
   hle/loader/exefs.h

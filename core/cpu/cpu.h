@@ -116,6 +116,16 @@ struct CPU_Backend
 /* There is no CPU_REG_XZR / CPU_REG_SP constant at this interface.
  * SP: get_sp/set_sp. XZR: not architectural state; nothing to access. */
 
+/* System registers (get_sys_reg/set_sys_reg) are addressed by the MRS/MSR
+ * instruction's own field encoding - op0:op1:CRn:CRm:op2 packed into
+ * instruction bits [20:5] - so a backend can pass the decoded field group
+ * through unchanged and HLE can name registers without a second table.
+ * The kernel sets tpidrro_el0 (the TLS block pointer, §12) on every
+ * context switch through this interface. */
+#define CPU_SYSREG_ENCODE(op0, op1, crn, crm, op2) \
+  ((uint32_t)(((op0) << 19) | ((op1) << 16) | ((crn) << 12) | ((crm) << 8) | ((op2) << 5)))
+#define CPU_SYSREG_TPIDRRO_EL0 CPU_SYSREG_ENCODE(3u, 3u, 13u, 0u, 3u) /* S3_3_C13_C0_3 */
+
 /* ------------------------------------------------------------------ */
 /* Backend registry.                                                   */
 /* ------------------------------------------------------------------ */

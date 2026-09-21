@@ -201,6 +201,13 @@ voland/
       hle.h
       hle.c                  # syscall dispatch table
       kernel/
+        page_allocator.{h,c} # guest PHYSICAL page allocator over guest RAM (§4):
+                             # hands vmm_map its guest_pa; bump-only until the
+                             # memory HLE needs release
+        address_space.{h,c}  # Horizon region carve-up (code/alias/heap/stack/
+                             # tls_io) - the single source GetInfo answers from
+        process.{h,c}        # §12 bootstrap steps 2-4: map NSOs via vmm, stack,
+                             # TLS, main-thread entry ABI
         memory.{h,c}         # heap/MapMemory SVCs (thin layer over vmm)
         scheduler.{h,c}      # guest thread scheduler (§7)
         thread.{h,c}         # guest thread objects
@@ -2228,9 +2235,9 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 ### Phase 1 — Load & Memory
 
 - [x] **Softmmu** (`vmm.{h,c}`): page tables, map/unmap/reprotect/query, read/write, guest_to_host (§5)
-- [ ] Decrypted-NCA parsing (RomFS, ExeFS, npdm — no encryption handling per §1.6) + **NSO loader** (LZ4 segments) and process bootstrap per §12
-- [ ] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request
-- [ ] Load executable sections into guest memory *through vmm mappings*
+- [x] Decrypted-NCA parsing (RomFS, ExeFS, npdm — no encryption handling per §1.6) + **NSO loader** (LZ4 segments) and process bootstrap per §12
+- [ ] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request. *Partially landed with the bootstrap (v3.25): the main thread's TLS block is allocated from a process-owned TLS page and `tpidrro_el0` is set through the backend's sys-reg interface (`CPU_SYSREG_TPIDRRO_EL0`). Remaining: per-thread block allocation for CreateThread (`thread.{h,c}`) and IPC's use of the block.*
+- [x] Load executable sections into guest memory *through vmm mappings*
 - [ ] Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers
 - [ ] Minimal IPC + sm: stub
 - [ ] Input region + seqlock writer/reader (§18)
@@ -2380,9 +2387,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.24.0*
+*Document version: 3.25.0*
 *Last updated: September 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.24 → v3.25 (summary)
+
+- **§12 process bootstrap implemented (closes the §25 Phase 1 loader checkbox and "load executable sections through vmm mappings").** `core/hle/kernel/` gains three units, each header-reviewed before implementation. **`page_allocator.{h,c}`**: guest *physical* page allocator over the layout's guest RAM - `vmm_map` needs a `guest_pa` and nothing handed them out; bump-only (nothing in bootstrap frees; a freelist lands with the memory HLE). **`address_space.{h,c}`**: the Horizon 39-bit carve-up (`code` at 128MB, then `alias` 64GB / `heap` 6GB / `stack` 2GB / `tls_io` 64GB back to back) as one struct - the "single source of truth" GetInfo will answer from; caller-seeded ASLR shifts the code base by 2MB granules, seed 0 = deterministic. **`process.{h,c}`**: steps 2-4 - opens the ExeFS NSOs in Horizon order (`rtld, main, subsdk0-9, sdk`; `main` mandatory), maps each image RW from freshly allocated pages, decompresses segments *straight into borrowed guest pages* inside a `vmm_borrow_scope` (the "section-copy pass" §5 provides for; no pointer arithmetic into guest RAM outside vmm), zeroes .bss, reprotects .text RX / .rodata R / .data+.bss RW, maps the npdm-sized main-thread stack behind an unmapped guard page and one TLS page, and `process_enter_main_thread` writes the Horizon entry ABI through the backend: X0 = 0, X1 = main thread handle, SP = stack top, PC = rtld (or main) base, `tpidrro_el0` = TLS block. Every failure unwinds its own mappings. `emulator_load_program(emu, nca, aslr_seed)` / `emulator_unload_program` run the whole path (NCA → ExeFS → npdm → bootstrap → armed `cpu_state`) with a per-call loader arena; the §1.6 encrypted-input message surfaces through it unchanged. `cpu.h` gains `CPU_SYSREG_ENCODE` (MRS/MSR field encoding) and `CPU_SYSREG_TPIDRRO_EL0`; the noop backend now stores that one register so the plumbing is observable. Tests: `tests/page_allocator_test.c`, `tests/address_space_test.c` (exact no-ASLR bases, invariants under seeds, fit limits), `tests/process_test.c` (four-module ExeFS; permissions asserted via `vmm_query`, bytes via `vmm_read_block`, zeroing over deliberately dirtied physical pages, entry ABI via the backend, ASLR, rollback on page exhaustion, missing `main`, corrupt NSO, 36-bit npdm, teardown-then-rebootstrap), `loader_smoke` extended through `emulator_load_program`. Verified: MSVC 19.51 13/13 ctest, zero diagnostics at `/W4 /WX`; GCC 16.2.1 (WSL) `-Werror` 13/13; mutation-checked (no text reprotect, no rollback, no image zeroing, no stack zeroing, X1 unset, wrong entry module) - tests fail on each.
+- **§12 bootstrap deviations, stated:** (1) *region order under ASLR is fixed* (code, alias, heap, stack, tls_io); Horizon also shuffles the order. The guest learns bases only via GetInfo, so it cannot observe the difference, and a fixed order keeps a seed reproducible. (2) *Execute-only .text (NSO flag bit 6, firmware 20.0.0+) is mapped RX, not X*: the guest cannot tell without a fault it never takes, and X-only would forbid the interpreter's own fetches. (3) *36-bit and 32-bit address spaces* return `NOT_IMPLEMENTED` (every modern title is 39-bit). (4) The *main thread handle* is the constant `PROCESS_MAIN_THREAD_HANDLE` (0x8000: Horizon's `(linear_id << 15) | index` for the first entry); the Phase 2 handle table must issue exactly that entry to the main thread. (5) The bootstrap rewinds the shared scratch arena to an entry mark between segments by writing `used_bytes` directly (the ExeFS directory lives in the same arena, so `arena_reset` is off limits); a `arena_mark/arena_rewind` pair in `arena.h` is the tidy form and should land when a second caller needs it. (6) Tripwire hits, justified: `page_allocator.c` reads `guest_ram_size` for bounds only; `process.c` offsets a pointer *borrowed from vmm* within its scope.
 
 ### Changelog v3.23 → v3.24 (summary)
 

@@ -32,3 +32,20 @@ foreach(loader_test byte_source_test exefs_test romfs_test npdm_test nca_parse_t
   target_link_libraries(${loader_test} PRIVATE switch_core loader_fixtures)
   add_test(NAME ${loader_test} COMMAND ${loader_test})
 endforeach()
+
+#
+# core/hle/kernel (§12 process bootstrap): the page allocator and address
+# space are pure units; process_test drives the bootstrap over a
+# synthesized ExeFS and asserts through vmm.
+#
+add_executable(page_allocator_test page_allocator_test.c)
+target_link_libraries(page_allocator_test PRIVATE switch_core)
+add_test(NAME page_allocator_test COMMAND page_allocator_test)
+
+add_executable(address_space_test address_space_test.c)
+target_link_libraries(address_space_test PRIVATE switch_core)
+add_test(NAME address_space_test COMMAND address_space_test)
+
+add_executable(process_test process_test.c)
+target_link_libraries(process_test PRIVATE switch_core loader_fixtures)
+add_test(NAME process_test COMMAND process_test)
