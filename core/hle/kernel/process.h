@@ -129,7 +129,8 @@ typedef struct Process_Bootstrap_Params {
  *   RESULT_INVALID_ARGUMENT NULL params or members; an NSO fails to
  *                           parse (nso_open's reasons); the modules do
  *                           not fit the code region; the npdm stack size
- *                           is zero or not page-aligned
+ *                           is zero, not page-aligned, or (with its guard
+ *                           page) does not fit the stack region
  *   RESULT_NOT_FOUND        no `main` in the ExeFS
  *   RESULT_NOT_IMPLEMENTED  address-space type other than 39-bit; an NSO
  *                           refused by nso_open for that reason (zstd)
