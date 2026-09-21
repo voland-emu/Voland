@@ -11,11 +11,16 @@
 
 #include "common/layout.h"
 #include "common/result.h"
+#include "common/vmm.h"
 #include "cpu/cpu.h"
 #include "hle/hle.h"
 
 typedef struct Emulator
 {
+  /* Softmmu (§5). Created after the layout and before the CPU backend,
+   * which receives it at CPU_State creation; shared by every CPU_State
+   * and by HLE. */
+  VMM_Context *vmm;
   const CPU_Backend *cpu_backend;
   /* One CPU_State stands in for "the" guest thread until the Phase 2
    * scheduler (§7) exists to multiplex real ones. */
@@ -23,11 +28,12 @@ typedef struct Emulator
   HLE_Context hle;
 } Emulator;
 
-/* Reserves the linear memory layout (§4) and wires the active CPU backend
- * (§8) to the stub HLE dispatcher. There is no Emulator_Config: guest RAM
- * size and every other region size are fixed by common/layout.h, not
- * caller-configurable - on web the single WebAssembly.Memory is created by
- * the boot sequence (§16) before the core module is even instantiated. */
+/* Reserves the linear memory layout (§4), creates the softmmu (§5), and
+ * wires the active CPU backend (§8) to the stub HLE dispatcher. There is
+ * no Emulator_Config: guest RAM size and every other region size are
+ * fixed by common/layout.h, not caller-configurable - on web the single
+ * WebAssembly.Memory is created by the boot sequence (§16) before the
+ * core module is even instantiated. */
 Error emulator_create(Emulator *out);
 void emulator_destroy(Emulator *emulator);
 

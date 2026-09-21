@@ -16,6 +16,8 @@ typedef enum Result
   RESULT_NOT_FOUND = 3,
   RESULT_IO_ERROR = 4,
   RESULT_NOT_IMPLEMENTED = 5,
+  RESULT_MEMORY_FAULT = 6,    /* guest VA unmapped / permission denied (vmm, §5) */
+  RESULT_NOT_CONTIGUOUS = 7,  /* vmm_guest_to_host: range spans non-adjacent host pages */
 } Result;
 
 typedef struct Error

@@ -4,6 +4,7 @@ set(SWITCH_CORE_SOURCES
   common/log.c
   common/arena.c
   common/layout.c
+  common/vmm.c
   cpu/cpu.c
   cpu/backends/noop/noop.c
   hle/hle.c

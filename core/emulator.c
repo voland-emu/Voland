@@ -18,19 +18,29 @@ Error emulator_create(Emulator* out) {
     return layout_err;
   }
 
-  /* 2. CPU backend selected at configure time. vmm is NULL until Phase 1
-   * (§5) implements it; the no-op backend never dereferences it. */
+  /* 2. Softmmu (§5): page tables over the layout's L1 region. Shared by
+   * every CPU_State and by HLE. */
+  out->vmm = vmm_create();
+  if (!out->vmm) {
+    layout_destroy();
+    memset(out, 0, sizeof(*out));
+    return ERR(RESULT_OUT_OF_MEMORY, "emulator_create: vmm_create failed");
+  }
+
+  /* 3. CPU backend selected at configure time; it receives the MMU, never
+   * raw guest RAM (§8). */
   out->cpu_backend = cpu_get_active_backend();
   SWITCH_ASSERT_ALWAYS(out->cpu_backend != NULL, "no CPU backend registered");
 
-  out->cpu_state = out->cpu_backend->create(/*vmm=*/NULL, &out->hle);
+  out->cpu_state = out->cpu_backend->create(out->vmm, &out->hle);
   if (!out->cpu_state) {
+    vmm_destroy(out->vmm);
     layout_destroy();
     memset(out, 0, sizeof(*out));
     return ERR(RESULT_OUT_OF_MEMORY, "emulator_create: CPU backend failed to init");
   }
 
-  /* 3. HLE context + svc/undefined hooks. */
+  /* 4. HLE context + svc/undefined hooks. */
   hle_context_init(&out->hle, out->cpu_backend);
   out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
   out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
@@ -47,6 +57,7 @@ void emulator_destroy(Emulator* emulator) {
   if (emulator->cpu_backend && emulator->cpu_state) {
     emulator->cpu_backend->destroy(emulator->cpu_state);
   }
+  vmm_destroy(emulator->vmm);
   layout_destroy();
   memset(emulator, 0, sizeof(*emulator));
 }
