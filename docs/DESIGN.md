@@ -2137,29 +2137,42 @@ option(AUDIO_BACKEND "wasapi|coreaudio|pipewire|none|auto" "auto")  # web: none 
 
 ```cmake
 if(EMSCRIPTEN)
-  target_compile_options(switch_core PRIVATE
+  # wasm64 and pthreads change codegen, not just link behavior: both flags
+  # go on the compile AND link lines or objects come out wasm32.
+  set(VOLAND_WASM_CODEGEN_FLAGS
     -msimd128                 # REQUIRED: NEON → WASM SIMD; ~4x slowdown without
+    -m64                      # wasm64: REQUIRED for Switch 1, not just 2 (§4)
+    -pthread                  # implies SHARED_MEMORY
+    -sSHARED_MEMORY=1         # redundant under -pthread; kept for explicitness
   )
+  target_compile_options(switch_core PRIVATE ${VOLAND_WASM_CODEGEN_FLAGS})
   target_link_options(switch_core PRIVATE
-    -s WASM=1
-    -s WASM_BIGINT=1
-    -s MEMORY64=1             # REQUIRED for Switch 1, not just 2 (§4)
-    -s SHARED_MEMORY=1
-    -s IMPORTED_MEMORY=1      # host creates the single WebAssembly.Memory (§16)
-    -s INITIAL_MEMORY=5637144576   # ≈5.25GB; must equal the host's initial
-    -s MAXIMUM_MEMORY=5637144576   # == INITIAL: growth disabled, views never detach
-    -s ALLOW_MEMORY_GROWTH=0
-    -s USE_PTHREADS=1
-    -s PTHREAD_POOL_SIZE=8
-    -s EXPORTED_FUNCTIONS='["_emulator_create","_emulator_destroy",
-                             "_scheduler_tick","_layout_get",
-                             "_cpu_get_reg","_cpu_set_reg"]'
-    -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]'
+    ${VOLAND_WASM_CODEGEN_FLAGS}
+    -sWASM=1
+    -sIMPORTED_MEMORY=1       # host creates the single WebAssembly.Memory (§16)
+    -sINITIAL_MEMORY=5637144576   # ≈5.25GB; must equal the host's initial; with
+                                  # growth disabled this IS the maximum — views
+                                  # never detach
+    -sALLOW_MEMORY_GROWTH=0       # fixed at boot (§4); never enable
+    -sPTHREAD_POOL_SIZE=8
+    -sEXPORTED_FUNCTIONS='["_emulator_create","_emulator_destroy",
+                            "_scheduler_tick","_layout_get",
+                            "_cpu_get_reg","_cpu_set_reg"]'
+    -sEXPORTED_RUNTIME_METHODS='["ccall","cwrap"]'
   )
 endif()
 ```
 
-Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), `MAXIMUM_MEMORY` raised from 4GB to the full layout size and pinned to `INITIAL`, growth disabled, `MEMORY64` reclassified from Switch 2 prep to a Switch 1 requirement.
+Flag spellings are pinned to what Emscripten 6.0.9 accepts without `-Wdeprecated`. The following are **deliberately absent** and must not be reintroduced:
+
+| Absent flag | Why |
+|---|---|
+| `-sMEMORY64=1` | Deprecated alias of the standard Clang `-m64`. Verified on 6.0.9: `-m64` alone yields identical glue (`address:"i64"`, `shared:true`) and a wasm64 module. |
+| `-sUSE_PTHREADS=1` | Deprecated alias of `-pthread`, which also implies `SHARED_MEMORY`. |
+| `-sWASM_BIGINT=1` | On by default, and mandatory under wasm64 (i64 addresses cross the JS boundary as BigInt). A no-op. |
+| `-sMAXIMUM_MEMORY=…` | With `ALLOW_MEMORY_GROWTH=0`, `INITIAL_MEMORY` *is* the maximum; emcc warns that a separate `MAXIMUM_MEMORY` is meaningless. The invariant it documented — memory fixed at boot, `initial === maximum`, views never detach — lives on the `INITIAL_MEMORY`/`ALLOW_MEMORY_GROWTH` lines and in §4. |
+
+Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), memory pinned to the full layout size with growth disabled, `MEMORY64` reclassified from Switch 2 prep to a Switch 1 requirement. Changes in v3.21: flag spellings modernized (see table).
 
 ### Platform build targets
 
@@ -2351,9 +2364,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.20.0*
+*Document version: 3.21.0*
 *Last updated: September 2026*
-*Maintained by: proxy-alt*
+*Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.20 → v3.21 (summary)
+
+- **§24 Emscripten flag list modernized; web build now warning-free on emcc 6.0.9.** The deferred item from v3.20 is closed: `-sMEMORY64=1` → `-m64`, `-sUSE_PTHREADS=1` → `-pthread`, `-sWASM_BIGINT=1` dropped (default, and mandatory under wasm64), `-sMAXIMUM_MEMORY` dropped (meaningless with growth disabled — `INITIAL_MEMORY` is the maximum). §24 gains a table of deliberately-absent flags so none are reintroduced. Behavior-preserving: verified by a full `web` preset build (0 warnings, was 4) and by inspecting the emitted glue, which still creates the memory with `address:"i64"` and `shared:true`. `-sSHARED_MEMORY=1` is retained for explicitness although `-pthread` implies it. No change to memory sizing, exports, or the §4/§16 invariants. Minimum Emscripten raised from 3.1.60 to 6.0.9 in `global.json`/CONTRIBUTING/README, and `CMakeLists.txt` now refuses older SDKs at configure time (`EMSCRIPTEN_VERSION` check).
 
 ### Changelog v3.19 → v3.20 (summary)
 
