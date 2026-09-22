@@ -1232,13 +1232,16 @@ The table above is the boot-critical core, not an enumeration. Two entries are e
 ### HLE result type
 
 ```c
-#define HLE_RESULT_SUCCESS          0x00000000
-#define HLE_RESULT_NOT_IMPLEMENTED  0xF601
-#define HLE_RESULT_INVALID_HANDLE   0xE401
-#define HLE_RESULT_INVALID_POINTER  0xCC01
-#define HLE_RESULT_OUT_OF_MEMORY    0x1A01
-#define HLE_RESULT_NOT_FOUND        0xE002
-#define HLE_RESULT_ALREADY_EXISTS   0xFA02
+#define HLE_RESULT_SUCCESS               0x00000000
+#define HLE_RESULT_NOT_IMPLEMENTED       0xF601
+#define HLE_RESULT_INVALID_HANDLE        0xE401
+#define HLE_RESULT_INVALID_POINTER       0xCC01
+#define HLE_RESULT_OUT_OF_MEMORY         0xD001
+#define HLE_RESULT_NOT_FOUND             0xE002
+#define HLE_RESULT_ALREADY_EXISTS        0xFA02
+#define HLE_RESULT_INVALID_SIZE          0xCA01
+#define HLE_RESULT_INVALID_MEMORY_STATE  0xD401
+#define HLE_RESULT_INVALID_MEMORY_RANGE  0xDC01
 
 // Horizon Result encoding: (description << 9) | module. Module 1 is the
 // kernel — the constants above are genuine kernel results, e.g.
@@ -1246,6 +1249,8 @@ The table above is the boot-critical core, not an enumeration. Two entries are e
 #define HLE_MAKE_RESULT(module, description) \
   ((uint32_t)(((description) << 9) | ((module) & 0x1FF)))
 ```
+
+**Deviation, memory SVCs (§25 checkbox 5):** `HLE_RESULT_OUT_OF_MEMORY` was `0x1A01` from v3.0 through the Phase 0 stub — a value with no corresponding `KernelError_*` entry — because nothing had ever actually returned it to a guest register. The memory SVCs (SetHeapSize/MapMemory/UnmapMemory/QueryMemory, `core/hle/kernel/svc_memory.{h,c}`) are the first code to do so, so it was corrected against libnx's `result.h` (`KernelError_OutOfMemory=104`) in the same change, along with three new constants those SVCs need. Two further simplifications are documented in `svc_memory.h` itself rather than repeated here: `UnmapMemory` requires an exact match against a recorded `MapMemory` call (no partial unmap — real Horizon allows it, but the only real-world caller, libnx's `threadCreate`/`threadClose`, always unmaps the exact range it mapped); and `QueryMemory`'s `MemoryInfo.type`/`attr` model only the subset of Horizon's ~30 memory types reachable by a Phase 1 title (code/heap/stack/TLS/unmapped) rather than the full enum, since the rest describe kernel objects (transfer memory, IPC buffers, module code) no SVC before Phase 5+ can create.
 
 ### Services implementation priority
 
@@ -2241,7 +2246,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [x] Decrypted-NCA parsing (RomFS, ExeFS, npdm — no encryption handling per §1.6) + **NSO loader** (LZ4 segments) and process bootstrap per §12
 - [x] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request. *v3.26: `tls.{h,c}` is the per-process TLS page allocator (0x200 blocks, pages mapped via vmm on demand); `thread.{h,c}` owns a thread's `CPU_State` + block and arms `tpidrro_el0` once through `CPU_SYSREG_TPIDRRO_EL0`; the bootstrap's main thread draws from the same allocator. The IPC layer's reading of the block (`TLS_IPC_COMMAND_BUFFER_BYTES`) belongs to the "Minimal IPC + sm: stub" item; the CreateThread SVC that calls `thread_create` is Phase 2.*
 - [x] Load executable sections into guest memory *through vmm mappings*
-- [ ] Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers
+- [x] **Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers** — `hle/kernel/svc_memory.{h,c}`, plus UnmapMemory (MapMemory's inverse; §12's priority list names it alongside the other three even though this checkbox's title predates it). Register ABI verified against libnx's `svc.s`/`svc.h` rather than assumed from C parameter order (SetHeapSize's size arrives in X1, not X0 - see `svc_memory.h`). Two scoped-down simplifications, both documented at the top of `svc_memory.h` and in the "Deviation" note after §12's HLE result type: UnmapMemory requires an exact match against a recorded MapMemory call (no partial unmap); QueryMemory's `MemoryInfo.type`/`attr` model only the address-space regions reachable by a Phase 1 title, not Horizon's full ~30-value enum. `page_allocator.h` gained a release path (a small freelist) for SetHeapSize's shrink and process teardown - the first callers page_allocator.h itself anticipated needing one.
 - [ ] Minimal IPC + sm: stub
 - [ ] Input region + seqlock writer/reader (§18)
 - [ ] User-facing error path for encrypted input → dumping guide

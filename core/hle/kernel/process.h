@@ -82,6 +82,24 @@
 /* One guard page below the main-thread stack. */
 #define PROCESS_STACK_GUARD_PAGES ((uint64_t)1)
 
+/* svcSetHeapSize's own alignment rule (libnx: "must be a multiple of
+ * 0x200000"), reused here rather than re-deriving a magic number. */
+#define PROCESS_HEAP_SIZE_GRANULE ((uint64_t)0x200000)
+
+/* Outstanding svcMapMemory aliases (hle/kernel/svc_memory.h): a heap range
+ * reprotected to no access plus the stack-region mirror that now backs it.
+ * Small and fixed because Phase 1 has exactly one thread (bootstrap's
+ * main thread; CreateThread is Phase 2) and this SVC exists mainly for a
+ * thread's own stack-guard-page trick - revisit the cap once multiple
+ * threads actually exercise it. */
+#define PROCESS_MAX_HEAP_BORROWS 8u
+
+typedef struct Memory_Borrow {
+  uint64_t dst_base; /* in address_space.stack; the new alias */
+  uint64_t src_base; /* in address_space.heap; reprotected to VMM_PERM_NONE */
+  uint64_t size;
+} Memory_Borrow;
+
 typedef struct Process_Module {
   char name[PROCESS_MODULE_NAME_BYTES]; /* ExeFS file name */
   uint64_t base_gva;                    /* image base; page-aligned */
@@ -109,8 +127,14 @@ typedef struct Process {
    * in use after bootstrap: the main thread's. */
   TLS_Allocator tls;
 
-  /* Bookkeeping the memory HLE reads. */
+  /* Bookkeeping the memory HLE reads and writes (hle/kernel/svc_memory.h). */
   uint64_t code_bytes_mapped; /* sum of image sizes */
+  uint64_t heap_size;         /* svcSetHeapSize: bytes committed at
+                               * [address_space.heap.base, +heap_size);
+                               * 0 until the guest's first successful call,
+                               * always a PROCESS_HEAP_SIZE_GRANULE multiple */
+  Memory_Borrow heap_borrows[PROCESS_MAX_HEAP_BORROWS]; /* active svcMapMemory aliases */
+  uint32_t heap_borrow_count;
 } Process;
 
 typedef struct Process_Bootstrap_Params {
@@ -149,9 +173,14 @@ Error process_enter_main_thread(const Process *process, const CPU_Backend *backe
  * buildId lookups. */
 const Process_Module *process_find_module(const Process *process, uint64_t gva);
 
-/* Unmaps everything the bootstrap mapped (modules, stack, every TLS
- * page) and zeroes `process`. Physical pages are not reclaimed (page_allocator.h).
- * Safe on a zeroed Process. */
-void process_teardown(Process *process, VMM_Context *vmm);
+/* Unmaps everything the bootstrap mapped (modules, stack, every TLS page),
+ * plus anything the memory HLE added afterwards: the committed heap
+ * (heap_size bytes at address_space.heap.base) and every live
+ * svcMapMemory alias (both the stack-region mirror and the reprotect on
+ * its heap source are undone). The heap's physical pages are returned to
+ * `pages` (page_allocator_free, hle/kernel/page_allocator.h); the
+ * bootstrap's own pages are still not reclaimed (unchanged from before -
+ * see page_allocator.h). Zeroes `process`. Safe on a zeroed Process. */
+void process_teardown(Process *process, VMM_Context *vmm, Page_Allocator *pages);
 
 #endif /* SWITCH_HLE_KERNEL_PROCESS_H */

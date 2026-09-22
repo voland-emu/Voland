@@ -285,7 +285,7 @@ int main(void) {
   /* Teardown leaves vmm clean; a fresh bootstrap at the same base works. */
   const uint64_t old_stack = process.main_thread_stack.base;
   const uint64_t old_tls = process.main_thread_tls_gva;
-  process_teardown(&process, emu.vmm);
+  process_teardown(&process, emu.vmm, &emu.pages);
   CHECK(process.module_count == 0);
   expect_unmapped(emu.vmm, ADDRESS_SPACE_39_START);
   expect_unmapped(emu.vmm, old_stack);
@@ -293,7 +293,7 @@ int main(void) {
   page_allocator_reset(&emu.pages);
   CHECK_OK(process_bootstrap(&params, &process));
   check_bootstrapped(&process, emu.vmm, SPEC_COUNT, ADDRESS_SPACE_39_START);
-  process_teardown(&process, emu.vmm);
+  process_teardown(&process, emu.vmm, &emu.pages);
   page_allocator_reset(&emu.pages);
 
   /* --- ASLR: the seed moves the code base by whole granules. --- */
@@ -302,7 +302,7 @@ int main(void) {
   CHECK(process.entry_point != ADDRESS_SPACE_39_START);
   CHECK((process.entry_point - ADDRESS_SPACE_39_START) % ADDRESS_SPACE_ASLR_GRANULE == 0);
   check_bootstrapped(&process, emu.vmm, SPEC_COUNT, process.entry_point);
-  process_teardown(&process, emu.vmm);
+  process_teardown(&process, emu.vmm, &emu.pages);
   page_allocator_reset(&emu.pages);
   params.aslr_seed = 0;
 
@@ -418,7 +418,7 @@ int main(void) {
     expect_run(emu.vmm, process.modules[0].base_gva, PAGE, VMM_PERM_RW); /* the hole before .text */
     CHECK_OK(process_enter_main_thread(&process, cpu, emu.cpu_state));
     CHECK(cpu->get_pc(emu.cpu_state) == process.modules[0].base_gva + PAGE);
-    process_teardown(&process, emu.vmm);
+    process_teardown(&process, emu.vmm, &emu.pages);
     page_allocator_reset(&emu.pages);
     fixture_buffer_free(&offset_image);
     fixture_buffer_free(&offset_nso);
@@ -427,7 +427,7 @@ int main(void) {
   /* Still bootstrappable after all of that: nothing leaked into vmm. */
   CHECK_OK(process_bootstrap(&params, &process));
   check_bootstrapped(&process, emu.vmm, SPEC_COUNT, ADDRESS_SPACE_39_START);
-  process_teardown(&process, emu.vmm);
+  process_teardown(&process, emu.vmm, &emu.pages);
 
   arena_destroy(&exefs_arena);
   arena_destroy(&scratch);

@@ -11,6 +11,7 @@ set(SWITCH_CORE_SOURCES
   hle/kernel/page_allocator.c
   hle/kernel/address_space.c
   hle/kernel/process.c
+  hle/kernel/svc_memory.c
   hle/kernel/tls.c
   hle/kernel/thread.c
   hle/loader/byte_source.c
@@ -24,7 +25,7 @@ set(SWITCH_CORE_SOURCES
 
 #
 # The ONLY third-party code in core/: single-file LZ4 (BSD-2) for NSO
-# segment decompression (docs/DESIGN.md §12, §26). Built with every
+# segment decompression (docs/DESIGN.md ï¿½12, ï¿½26). Built with every
 # allocating entry point compiled out, so the object contains no
 # malloc/calloc/free - the loader uses LZ4_decompress_safe over arena
 # storage and tests use the stack-state LZ4_compress_default.
@@ -53,6 +54,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/kernel/page_allocator.h
   hle/kernel/address_space.h
   hle/kernel/process.h
+  hle/kernel/svc_memory.h
   hle/kernel/tls.h
   hle/kernel/thread.h
   hle/loader/byte_source.h

@@ -4,6 +4,7 @@
  */
 #include "hle/kernel/process.h"
 
+#include "common/layout.h"
 #include "common/log.h"
 
 #include <string.h>
@@ -295,8 +296,89 @@ const Process_Module *process_find_module(const Process *process, uint64_t gva) 
   return NULL;
 }
 
-void process_teardown(Process *process, VMM_Context *vmm) {
-  if (!process || !vmm) return;
+/* Undoes every live svcMapMemory borrow (hle/kernel/svc_memory.h) before
+ * the heap-wide release below runs: a borrowed-out heap range sits at
+ * VMM_PERM_NONE, which free_teardown_heap_range's vmm_guest_to_host(...,
+ * VMM_PERM_R, ...) would refuse to read - reprotecting first makes the
+ * whole committed heap uniformly readable again. Best-effort like
+ * unmap_all: a teardown that hits an inconsistency logs and keeps going
+ * rather than aborting the whole process' destruction. */
+static void unwind_heap_borrows(VMM_Context *vmm, Process *process) {
+  for (uint32_t i = 0; i < process->heap_borrow_count; i++) {
+    const Memory_Borrow *b = &process->heap_borrows[i];
+    Error err = vmm_unmap(vmm, b->dst_base, b->size);
+    if (!error_is_ok(err)) {
+      log_error("process: teardown unmap of borrow dst 0x%llx failed: %s",
+                (unsigned long long)b->dst_base, err.message);
+    }
+    err = vmm_reprotect(vmm, b->src_base, b->size, VMM_PERM_RW);
+    if (!error_is_ok(err)) {
+      log_error("process: teardown reprotect of borrow src 0x%llx failed: %s",
+                (unsigned long long)b->src_base, err.message);
+    }
+  }
+}
+
+/* Releases the heap's physical pages (see hle/kernel/svc_memory.c's
+ * free_and_unmap_heap_range, which this duplicates - a two-call-site
+ * header felt like more ceremony than the duplication removes, revisit
+ * if a third caller shows up), then unmaps the whole committed heap
+ * range in one call. Best-effort: an inconsistency here means a prior
+ * teardown or SVC path already left the heap in a state this cannot
+ * make sense of; log and move on rather than aborting process
+ * destruction over it.
+ *
+ * Tries the whole range as one physical run first (the common case: a
+ * single SetHeapSize grow maps one page_allocator_allocate() run in one
+ * vmm_map() call), falling back to one page at a time - each in its own
+ * borrow scope - only if the backing got fragmented. Never one scope
+ * around the whole loop: vmm's debug borrow cap (VMM_DEBUG_MAX_BORROWS=64,
+ * vmm.c) exists to catch a leaking handler, not to size a loop that can
+ * run for hundreds of pages. */
+static void free_teardown_heap(VMM_Context *vmm, Page_Allocator *pages, Process *process) {
+  const uint64_t base = process->address_space.heap.base;
+  const uint64_t size = process->heap_size;
+
+  vmm_borrow_scope_begin(vmm);
+  void *host_ptr = NULL;
+  const Error got = vmm_guest_to_host(vmm, base, size, VMM_PERM_R, &host_ptr);
+  vmm_borrow_scope_end(vmm);
+  if (error_is_ok(got)) {
+    const uint64_t guest_pa = (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base;
+    const Error freed = page_allocator_free(pages, guest_pa, size >> VMM_PAGE_BITS);
+    if (!error_is_ok(freed)) {
+      log_error("process: teardown heap free (pa=0x%llx) failed: %s",
+                (unsigned long long)guest_pa, freed.message);
+    }
+  } else {
+    for (uint64_t offset = 0; offset < size; offset += VMM_PAGE_SIZE) {
+      vmm_borrow_scope_begin(vmm);
+      void *page_host_ptr = NULL;
+      const Error page_got =
+          vmm_guest_to_host(vmm, base + offset, VMM_PAGE_SIZE, VMM_PERM_R, &page_host_ptr);
+      vmm_borrow_scope_end(vmm);
+      if (!error_is_ok(page_got)) {
+        log_error("process: teardown heap page 0x%llx unreadable: %s",
+                  (unsigned long long)(base + offset), page_got.message);
+        continue;
+      }
+      const uint64_t page_pa = (uint64_t)(uintptr_t)page_host_ptr - layout_get()->guest_ram_base;
+      const Error page_freed = page_allocator_free(pages, page_pa, 1);
+      if (!error_is_ok(page_freed)) {
+        log_error("process: teardown heap page pa=0x%llx free failed: %s",
+                  (unsigned long long)page_pa, page_freed.message);
+      }
+    }
+  }
+
+  const Error unmapped = vmm_unmap(vmm, base, size);
+  if (!error_is_ok(unmapped)) {
+    log_error("process: teardown heap unmap failed: %s", unmapped.message);
+  }
+}
+
+void process_teardown(Process *process, VMM_Context *vmm, Page_Allocator *pages) {
+  if (!process || !vmm || !pages) return;
   Mapping_List mapped;
   mapped.count = 0;
   for (uint32_t m = 0; m < process->module_count; m++) {
@@ -308,6 +390,10 @@ void process_teardown(Process *process, VMM_Context *vmm) {
     mapped.ranges[mapped.count++] = process->main_thread_stack;
   }
   unmap_all(vmm, &mapped);
+  unwind_heap_borrows(vmm, process);
+  if (process->heap_size > 0) {
+    free_teardown_heap(vmm, pages, process);
+  }
   tls_allocator_teardown(&process->tls);
   memset(process, 0, sizeof(*process));
 }

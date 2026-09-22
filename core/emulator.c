@@ -44,15 +44,18 @@ Error emulator_create(Emulator* out) {
     return ERR(RESULT_OUT_OF_MEMORY, "emulator_create: CPU backend failed to init");
   }
 
-  /* 4. HLE context + svc/undefined hooks. */
-  hle_context_init(&out->hle, out->cpu_backend);
-  out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
-  out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
-
-  /* 5. Guest physical pages (§4): all of guest RAM, handed out by the
+  /* 4. Guest physical pages (§4): all of guest RAM, handed out by the
    * bootstrap and later the memory HLE. */
   const Error pages_err = page_allocator_init_guest_ram(&out->pages);
   SWITCH_ASSERT_ALWAYS(error_is_ok(pages_err), "page allocator over guest RAM failed");
+
+  /* 5. HLE context + svc/undefined hooks. `&out->process` is valid
+   * before emulator_load_program() populates it - same pattern as
+   * `out->cpu_state` above being handed `&out->hle` before
+   * hle_context_init() has even run (see hle.h's doc comment). */
+  hle_context_init(&out->hle, out->cpu_backend, out->vmm, &out->process, &out->pages);
+  out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
+  out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
 
   log_info("[emulator] created (backend=%s %s)",
            out->cpu_backend->name,
@@ -147,7 +150,7 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
 
   err = process_enter_main_thread(&emulator->process, emulator->cpu_backend, emulator->cpu_state);
   if (!error_is_ok(err)) {
-    process_teardown(&emulator->process, emulator->vmm);
+    process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
     page_allocator_reset(&emulator->pages);
     return err;
   }
@@ -159,7 +162,7 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
 
 void emulator_unload_program(Emulator* emulator) {
   if (!emulator || !emulator->program_loaded) return;
-  process_teardown(&emulator->process, emulator->vmm);
+  process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
   page_allocator_reset(&emulator->pages);
   emulator->program_loaded = false;
 }
