@@ -31,9 +31,10 @@
  *
  * Main-thread stack: `main_thread_stack_size` from the npdm, placed at
  * the start of the stack region behind one unmapped guard page. TLS:
- * one page from the tls_io region, block 0 (PROCESS_TLS_BLOCK_BYTES) is
- * the main thread's; the remaining blocks in that page are the TLS
- * allocator's free pool for threads created later (thread.{h,c}, Phase 2).
+ * the process owns a TLS_Allocator (tls.h) over its tls_io region; the
+ * main thread's block is the allocator's first allocation (block 0 of
+ * the first TLS page), and threads created later (thread.h) draw from
+ * the same allocator.
  *
  * The main thread handle is PROCESS_MAIN_THREAD_HANDLE. Horizon encodes
  * handles as (linear_id << 15) | index with linear ids starting at 1, so
@@ -66,6 +67,7 @@
 #include "cpu/cpu.h"
 #include "hle/kernel/address_space.h"
 #include "hle/kernel/page_allocator.h"
+#include "hle/kernel/tls.h"
 #include "hle/loader/exefs.h"
 #include "hle/loader/npdm.h"
 #include "hle/loader/nso.h"
@@ -73,9 +75,6 @@
 /* rtld + main + subsdk0..9 + sdk. */
 #define PROCESS_MAX_MODULES 13u
 #define PROCESS_MODULE_NAME_BYTES 8u /* "subsdk9" + NUL */
-
-#define PROCESS_TLS_BLOCK_BYTES ((uint64_t)0x200)
-#define PROCESS_TLS_BLOCKS_PER_PAGE (VMM_PAGE_SIZE / PROCESS_TLS_BLOCK_BYTES) /* 8 */
 
 /* Handle encoding (linear_id << 15) | index; first entry, first id. */
 #define PROCESS_MAIN_THREAD_HANDLE ((uint32_t)0x8000)
@@ -104,11 +103,11 @@ typedef struct Process {
   /* Main thread. */
   uint32_t main_thread_handle;
   Address_Region main_thread_stack; /* mapped RW; SP starts at base + size */
-  uint64_t main_thread_tls_gva;     /* block 0 of the TLS page */
+  uint64_t main_thread_tls_gva;     /* first block from `tls` */
 
-  /* TLS page pool for later threads: the page's remaining blocks. */
-  uint64_t tls_page_gva;
-  uint32_t tls_blocks_used; /* 1 after bootstrap */
+  /* TLS blocks for every thread of this process (tls.h). One block is
+   * in use after bootstrap: the main thread's. */
+  TLS_Allocator tls;
 
   /* Bookkeeping the memory HLE reads. */
   uint64_t code_bytes_mapped; /* sum of image sizes */
@@ -150,8 +149,8 @@ Error process_enter_main_thread(const Process *process, const CPU_Backend *backe
  * buildId lookups. */
 const Process_Module *process_find_module(const Process *process, uint64_t gva);
 
-/* Unmaps everything the bootstrap mapped (modules, stack, TLS page) and
- * zeroes `process`. Physical pages are not reclaimed (page_allocator.h).
+/* Unmaps everything the bootstrap mapped (modules, stack, every TLS
+ * page) and zeroes `process`. Physical pages are not reclaimed (page_allocator.h).
  * Safe on a zeroed Process. */
 void process_teardown(Process *process, VMM_Context *vmm);
 

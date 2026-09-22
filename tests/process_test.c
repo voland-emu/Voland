@@ -181,14 +181,16 @@ static void check_bootstrapped(const Process *process, VMM_Context *vmm, size_t 
   expect_unmapped(vmm, process->main_thread_stack.base + STACK_BYTES);
   CHECK(guest_is_zero(vmm, process->main_thread_stack.base, 0x1000));
 
-  /* TLS: one RW page at the start of tls_io; block 0 is the main thread's. */
-  CHECK(process->tls_page_gva == as->tls_io.base);
-  CHECK(process->main_thread_tls_gva == process->tls_page_gva);
-  CHECK((process->main_thread_tls_gva % PROCESS_TLS_BLOCK_BYTES) == 0);
-  CHECK(process->tls_blocks_used == 1);
-  expect_run(vmm, process->tls_page_gva, PAGE, VMM_PERM_RW);
-  expect_unmapped(vmm, process->tls_page_gva + PAGE);
-  CHECK(guest_is_zero(vmm, process->tls_page_gva, PAGE));
+  /* TLS: the process allocator (tls.h) owns one RW page at the start of
+   * tls_io; the main thread's block is its first allocation. */
+  CHECK(process->tls.page_count == 1);
+  CHECK(process->tls.blocks_in_use == 1);
+  CHECK(process->tls.mapped[0].gva == as->tls_io.base);
+  CHECK(process->main_thread_tls_gva == as->tls_io.base);
+  CHECK(tls_is_allocated(&process->tls, process->main_thread_tls_gva));
+  expect_run(vmm, as->tls_io.base, PAGE, VMM_PERM_RW);
+  expect_unmapped(vmm, as->tls_io.base + PAGE);
+  CHECK(guest_is_zero(vmm, as->tls_io.base, TLS_BLOCK_BYTES));
 
   CHECK(process->main_thread_handle == PROCESS_MAIN_THREAD_HANDLE);
   CHECK(strcmp(process->npdm.name, "ProcTest") == 0);
@@ -265,6 +267,14 @@ int main(void) {
   CHECK(cpu->get_sys_reg(emu.cpu_state, CPU_SYSREG_TPIDRRO_EL0) == process.main_thread_tls_gva);
   CHECK_CODE(process_enter_main_thread(NULL, cpu, emu.cpu_state), RESULT_INVALID_ARGUMENT);
 
+  /* A later thread's block comes from the same page, right after the
+   * main thread's (thread.h draws from process.tls). */
+  uint64_t second_tls = 0;
+  CHECK_OK(tls_allocate(&process.tls, &second_tls));
+  CHECK(second_tls == process.main_thread_tls_gva + TLS_BLOCK_BYTES);
+  CHECK(process.tls.page_count == 1 && process.tls.blocks_in_use == 2);
+  CHECK_OK(tls_free(&process.tls, second_tls));
+
   /* Lookup. */
   CHECK(process_find_module(&process, process.entry_point) == &process.modules[0]);
   CHECK(process_find_module(&process, process.modules[1].base_gva + 0x8FFF) == &process.modules[1]);
@@ -274,7 +284,7 @@ int main(void) {
 
   /* Teardown leaves vmm clean; a fresh bootstrap at the same base works. */
   const uint64_t old_stack = process.main_thread_stack.base;
-  const uint64_t old_tls = process.tls_page_gva;
+  const uint64_t old_tls = process.main_thread_tls_gva;
   process_teardown(&process, emu.vmm);
   CHECK(process.module_count == 0);
   expect_unmapped(emu.vmm, ADDRESS_SPACE_39_START);
@@ -305,6 +315,19 @@ int main(void) {
   expect_unmapped(emu.vmm, ADDRESS_SPACE_39_START + k_specs[0].expected_image_size);
   CHECK(scratch.used_bytes == scratch_mark);
   CHECK(process.module_count == 0);
+  params.pages = &emu.pages;
+
+  /* --- Rollback: pages run out exactly at the TLS page (modules and
+   * stack fit). The stack and every module come back off the map and
+   * the TLS allocator is torn down with nothing mapped in tls_io. --- */
+  uint64_t image_pages = 0;
+  for (size_t m = 0; m < SPEC_COUNT; m++) image_pages += k_specs[m].expected_image_size / PAGE;
+  CHECK_OK(page_allocator_init(&small_pool, 0x10000000, (image_pages + STACK_BYTES / PAGE) * PAGE));
+  params.pages = &small_pool;
+  CHECK_CODE(process_bootstrap(&params, &process), RESULT_OUT_OF_MEMORY);
+  expect_unmapped(emu.vmm, ADDRESS_SPACE_39_START);
+  expect_unmapped(emu.vmm, old_tls);
+  CHECK(process.tls.page_count == 0 && process.module_count == 0);
   params.pages = &emu.pages;
 
   /* --- Rejections that never map anything. --- */

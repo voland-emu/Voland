@@ -208,9 +208,12 @@ voland/
                              # tls_io) - the single source GetInfo answers from
         process.{h,c}        # §12 bootstrap steps 2-4: map NSOs via vmm, stack,
                              # TLS, main-thread entry ABI
+        tls.{h,c}            # per-process TLS page allocator: 0x200-byte blocks
+                             # (IPC command buffer first), pages mapped via vmm
         memory.{h,c}         # heap/MapMemory SVCs (thin layer over vmm)
         scheduler.{h,c}      # guest thread scheduler (§7)
-        thread.{h,c}         # guest thread objects
+        thread.{h,c}         # guest thread objects: CPU_State + TLS block,
+                             # tpidrro_el0 armed once at creation
         sync.{h,c}           # kernel sync objects (events, mutexes, arbiters)
         ipc.{h,c}
       services/
@@ -2236,7 +2239,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 - [x] **Softmmu** (`vmm.{h,c}`): page tables, map/unmap/reprotect/query, read/write, guest_to_host (§5)
 - [x] Decrypted-NCA parsing (RomFS, ExeFS, npdm — no encryption handling per §1.6) + **NSO loader** (LZ4 segments) and process bootstrap per §12
-- [ ] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request. *Partially landed with the bootstrap (v3.25): the main thread's TLS block is allocated from a process-owned TLS page and `tpidrro_el0` is set through the backend's sys-reg interface (`CPU_SYSREG_TPIDRRO_EL0`). Remaining: per-thread block allocation for CreateThread (`thread.{h,c}`) and IPC's use of the block.*
+- [x] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request. *v3.26: `tls.{h,c}` is the per-process TLS page allocator (0x200 blocks, pages mapped via vmm on demand); `thread.{h,c}` owns a thread's `CPU_State` + block and arms `tpidrro_el0` once through `CPU_SYSREG_TPIDRRO_EL0`; the bootstrap's main thread draws from the same allocator. The IPC layer's reading of the block (`TLS_IPC_COMMAND_BUFFER_BYTES`) belongs to the "Minimal IPC + sm: stub" item; the CreateThread SVC that calls `thread_create` is Phase 2.*
 - [x] Load executable sections into guest memory *through vmm mappings*
 - [ ] Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers
 - [ ] Minimal IPC + sm: stub
@@ -2387,9 +2390,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.25.0*
+*Document version: 3.26.0*
 *Last updated: September 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.25 → v3.26 (summary)
+
+- **§25 Phase 1 "TLS allocation + tpidrro_el0 plumbing" closed.** Two `core/hle/kernel/` units, headers reviewed before implementation. **`tls.{h,c}`**: the per-process TLS page allocator §12 names - `TLS_BLOCK_BYTES` (0x200) blocks, eight per `VMM_PAGE_SIZE` page, pages mapped RW through vmm on demand from the process's `tls_io` region (page *n* at `base + n·PAGE`), each block zeroed on allocation through a vmm borrow, freed blocks returned to their page's bitmap, lowest-page/lowest-block selection so the address sequence is deterministic, fixed cap `TLS_MAX_PAGES` = 64 (512 threads, no `malloc`), `tls_free` rejects anything that is not the base of a live block. **`thread.{h,c}`**: `Guest_Thread` = owned `CPU_State` + TLS block + entry/stack/priority/core; `thread_create` allocates the block, creates the state via the backend with the HLE SVC/undefined handlers installed, arms X0/SP/PC/PSTATE and writes `tpidrro_el0` **once** through `set_sys_reg` - under green threading (§7) "set on every context switch" reduces to "each state carries its own", since the scheduler switches by running a different state. `Process` now owns a `TLS_Allocator` (`tls` replaces the ad-hoc `tls_page_gva`/`tls_blocks_used` pair; `PROCESS_TLS_*` constants moved to `tls.h`); the main thread's block is its first allocation and rollback/teardown go through `tls_allocator_teardown`. Tests: `tests/tls_test.c` (init validation, mapping on first use only, in-page fill then second page, mid-page free reuse before a higher page, lower-page-wins, rejected frees, zeroing over a deliberately dirtied physical page, freed-not-zeroed, region-full / page-cap / physical-exhaustion each with the allocator unchanged, teardown unmaps every page), `tests/thread_test.c` (register file and `tpidrro_el0` asserted through the backend interface, distinct states/blocks per thread, SVC path through the thread's state, range/alignment/NULL rejections, TLS exhaustion leaking no state, destroy-then-reuse), `process_test` extended (main-thread block is `tls.mapped[0]` with `blocks_in_use == 1`, a post-bootstrap allocation lands at `+0x200`, rollback when pages run out exactly at the TLS page). Verified: GCC 16.2.1 (WSL) 15/15 ctest, zero new diagnostics; mutation-checked (no block zeroing → `tls_test` + `process_test` fail; no `tpidrro_el0` write → `thread_test` fails).
+- **Scope stated, not stubbed:** §7's scheduler fields of `Guest_Thread` (`run_state`, `wake_at_ns`, `waiting_on`, run-queue links), the CreateThread SVC, the handle-table entry, and folding the main thread into a `Guest_Thread` all arrive with the Phase 2 scheduler. The main thread stays armed into the emulator's single `CPU_State` by `process_enter_main_thread`.
+- **Deviation stated:** TLS pages grow upward from `tls_io.base` and nothing else is placed in that region yet; the region allocator that interleaves transfer memory with TLS pages lands with transfer memory (§12), and `tls_free`/`tls_is_allocated` already locate pages by table lookup rather than arithmetic so that change does not reach them.
 
 ### Changelog v3.24 → v3.25 (summary)
 
