@@ -82,8 +82,12 @@ int main(void)
 
   /* Simulate the backend calling the SVC handler on a CPU_EXIT_SVC: `swi`
    * is the SVC instruction's immediate, the actual Horizon syscall id -
-   * never X8 (§12). SetHeapSize is swi 0x01. */
-  hle_on_svc(emu.cpu_state, 0x01, &emu.hle);
+   * never X8 (§12). This smoke test only wants a syscall id nothing
+   * handles, to prove the generic wiring, not any one SVC's behavior
+   * (the memory SVCs - 0x01/0x04/0x05/0x06 - have their own test,
+   * svc_memory_test.c); 0x02 (SetMemoryPermission) is not implemented
+   * yet, unlike 0x01 (SetHeapSize) which this file used to name here. */
+  hle_on_svc(emu.cpu_state, 0x02, &emu.hle);
   CHECK(regs->x[0] == HLE_RESULT_NOT_IMPLEMENTED);
   CHECK(emu.hle.svc_call_count == 1);
 

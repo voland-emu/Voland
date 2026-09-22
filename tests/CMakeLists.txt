@@ -63,3 +63,12 @@ add_test(NAME tls_test COMMAND tls_test)
 add_executable(thread_test thread_test.c)
 target_link_libraries(thread_test PRIVATE switch_core)
 add_test(NAME thread_test COMMAND thread_test)
+
+#
+# core/hle/kernel/svc_memory (§25 checkbox 5): SVC-path tests over a real
+# process_bootstrap()'d Process, driven through hle_on_svc the way
+# thread_test drives thread SVCs.
+#
+add_executable(svc_memory_test svc_memory_test.c)
+target_link_libraries(svc_memory_test PRIVATE switch_core loader_fixtures)
+add_test(NAME svc_memory_test COMMAND svc_memory_test)

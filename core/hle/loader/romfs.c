@@ -273,9 +273,9 @@ static Error find_child_file(const RomFS *fs, uint32_t parent, const char *name,
 }
 
 /* Walks every component but the last as a directory, starting at the
- * root. On success *parent is the containing directory and
- * *leaf/*leaf_length name the final component (leaf_length == 0 means
- * the path named the root itself). */
+ * root. On success *parent is the containing directory and *leaf and
+ * *leaf_length name the final component (leaf_length == 0 means the
+ * path named the root itself). */
 static Error walk_to_parent(const RomFS *fs, const char *path, uint32_t *parent,
                             const char **leaf, uint32_t *leaf_length,
                             bool *had_trailing_separator) {

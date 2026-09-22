@@ -1,14 +1,19 @@
 #include "hle/hle.h"
 #include "common/assert.h"
 #include "common/log.h"
+#include "hle/kernel/svc_memory.h"
 
 #include <stddef.h>
 
-void hle_context_init(HLE_Context *context, const CPU_Backend *backend)
+void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
+                      VMM_Context *vmm, Process *process, Page_Allocator *pages)
 {
   SWITCH_ASSERT_ALWAYS(context != NULL, "hle_context_init: context is NULL");
   SWITCH_ASSERT_ALWAYS(backend != NULL, "hle_context_init: backend is NULL");
   context->cpu_backend = backend;
+  context->vmm = vmm;
+  context->process = process;
+  context->pages = pages;
   context->svc_call_count = 0;
 }
 
@@ -86,14 +91,38 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
 
   context->svc_call_count++;
 
-  /* Phase 0 has no real syscall handlers yet - the full dispatch table
-   * (§12) arrives with the memory/threading/IPC SVCs in Phase 1-2. Every
-   * SVC hits the "unimplemented" arm from §12's unimplemented-surface
-   * policy: log, then HLE_RESULT_NOT_IMPLEMENTED in W0. */
+  /* Handlers below that call vmm_guest_to_host bracket each individual
+   * call in its own vmm_borrow_scope_begin/end, right where it happens
+   * (svc_memory.c) - NOT one scope around this whole dispatch. A
+   * dispatch-wide scope was tried first and immediately hit vmm's debug
+   * borrow cap (VMM_DEBUG_MAX_BORROWS=64, vmm.c): SetHeapSize's shrink
+   * path can call vmm_guest_to_host once per released page, hundreds of
+   * times in one call, and the cap exists to catch a handler that LEAKS
+   * borrows, not to size a loop's borrow budget. Scoping tightly around
+   * each call keeps at most one borrow live at a time regardless of how
+   * many pages a handler walks. */
+
+  /* §12's dispatch table, Phase 1 slice: the four memory SVCs this
+   * checkbox implements (thin layers over vmm/process/pages - see
+   * hle/kernel/svc_memory.h) plus the §12 unimplemented-surface policy
+   * default arm for everything else: log, then HLE_RESULT_NOT_IMPLEMENTED
+   * in W0. */
   switch (swi)
   {
+  case 0x01:
+    hle_svc_set_heap_size(context, cpu_state);
+    break;
+  case 0x04:
+    hle_svc_map_memory(context, cpu_state);
+    break;
+  case 0x05:
+    hle_svc_unmap_memory(context, cpu_state);
+    break;
+  case 0x06:
+    hle_svc_query_memory(context, cpu_state);
+    break;
   default:
-    log_warn("[hle] SVC 0x%02x (%s) at PC 0x%016llx - unimplemented (Phase 0 stub)",
+    log_warn("[hle] SVC 0x%02x (%s) at PC 0x%016llx - unimplemented",
              swi,
              svc_name(swi),
              (unsigned long long)regs->pc);
