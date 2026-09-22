@@ -11,6 +11,8 @@ set(SWITCH_CORE_SOURCES
   hle/kernel/page_allocator.c
   hle/kernel/address_space.c
   hle/kernel/process.c
+  hle/kernel/tls.c
+  hle/kernel/thread.c
   hle/loader/byte_source.c
   hle/loader/nca_parse.c
   hle/loader/exefs.c
@@ -51,6 +53,8 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/kernel/page_allocator.h
   hle/kernel/address_space.h
   hle/kernel/process.h
+  hle/kernel/tls.h
+  hle/kernel/thread.h
   hle/loader/byte_source.h
   hle/loader/nca_parse.h
   hle/loader/exefs.h

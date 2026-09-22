@@ -11,8 +11,9 @@
 /* X1 carries the main thread handle at entry (step 4). */
 #define PROCESS_REG_MAIN_THREAD_HANDLE ((uint8_t)(CPU_REG_X0 + 1))
 
-/* One stack + one TLS page on top of the modules. */
-#define BOOTSTRAP_MAX_MAPPINGS (PROCESS_MAX_MODULES + 2u)
+/* One stack on top of the modules; TLS pages roll back through their
+ * own allocator. */
+#define BOOTSTRAP_MAX_MAPPINGS (PROCESS_MAX_MODULES + 1u)
 
 typedef struct Mapping_List {
   Address_Region ranges[BOOTSTRAP_MAX_MAPPINGS];
@@ -241,14 +242,12 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
   err = zero_range(params->vmm, out->main_thread_stack.base, out->main_thread_stack.size);
   if (!error_is_ok(err)) goto fail;
 
-  /* Step 4b: TLS page; block 0 is the main thread's. */
-  out->tls_page_gva = out->address_space.tls_io.base;
-  err = map_fresh_rw(params->vmm, params->pages, &mapped, out->tls_page_gva, VMM_PAGE_SIZE);
+  /* Step 4b: the process's TLS allocator over tls_io; the main thread's
+   * block is its first allocation (block 0 of the first page, zeroed). */
+  err = tls_allocator_init(&out->tls, params->vmm, params->pages, out->address_space.tls_io);
   if (!error_is_ok(err)) goto fail;
-  err = zero_range(params->vmm, out->tls_page_gva, VMM_PAGE_SIZE);
+  err = tls_allocate(&out->tls, &out->main_thread_tls_gva);
   if (!error_is_ok(err)) goto fail;
-  out->main_thread_tls_gva = out->tls_page_gva;
-  out->tls_blocks_used = 1;
 
   out->main_thread_handle = PROCESS_MAIN_THREAD_HANDLE;
   out->npdm = *npdm;
@@ -259,6 +258,7 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
   return OK;
 
 fail:
+  tls_allocator_teardown(&out->tls);
   unmap_all(params->vmm, &mapped);
   arena_rewind_to(params->scratch, scratch_mark);
   memset(out, 0, sizeof(*out));
@@ -307,11 +307,7 @@ void process_teardown(Process *process, VMM_Context *vmm) {
   if (process->main_thread_stack.size > 0) {
     mapped.ranges[mapped.count++] = process->main_thread_stack;
   }
-  if (process->tls_blocks_used > 0) {
-    mapped.ranges[mapped.count].base = process->tls_page_gva;
-    mapped.ranges[mapped.count].size = VMM_PAGE_SIZE;
-    mapped.count++;
-  }
   unmap_all(vmm, &mapped);
+  tls_allocator_teardown(&process->tls);
   memset(process, 0, sizeof(*process));
 }

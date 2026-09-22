@@ -49,3 +49,17 @@ add_test(NAME address_space_test COMMAND address_space_test)
 add_executable(process_test process_test.c)
 target_link_libraries(process_test PRIVATE switch_core loader_fixtures)
 add_test(NAME process_test COMMAND process_test)
+
+#
+# core/hle/kernel TLS + threads (§12 "TLS is the transport"): tls_test
+# drives the block allocator over a real vmm; thread_test arms threads
+# through the noop backend and asserts the register file and
+# tpidrro_el0 through the backend interface.
+#
+add_executable(tls_test tls_test.c)
+target_link_libraries(tls_test PRIVATE switch_core)
+add_test(NAME tls_test COMMAND tls_test)
+
+add_executable(thread_test thread_test.c)
+target_link_libraries(thread_test PRIVATE switch_core)
+add_test(NAME thread_test COMMAND thread_test)
