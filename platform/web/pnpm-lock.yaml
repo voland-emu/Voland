@@ -16,8 +16,8 @@ importers:
         specifier: ^1.48.0
         version: 1.61.1
       '@webgpu/types':
-        specifier: ^0.1.72
-        version: 0.1.72
+        specifier: ^0.1.74
+        version: 0.1.74
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -246,8 +246,8 @@ packages:
   '@types/babel__traverse@7.28.0':
     resolution: {integrity: sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q==}
 
-  '@webgpu/types@0.1.72':
-    resolution: {integrity: sha512-0cF7RFM2edNoiIS1ODJp0/Gzv4/xSXhwoR0YCza+OWpJWtn4wmo9DvK91aLlH9+uUnwIriP7ZiC3WitmyhuzBw==}
+  '@webgpu/types@0.1.74':
+    resolution: {integrity: sha512-lgiI4hbuLcI9unnm2cL/tvCaQU45dp0xcLWJh5uB/9MBGvIA4F8XIk7nSiBeg+K4xWGYwgZKn80LmERI5CxoTA==}
 
   babel-plugin-jsx-dom-expressions@0.40.6:
     resolution: {integrity: sha512-v3P1MW46Lm7VMpAkq0QfyzLWWkC8fh+0aE5Km4msIgDx5kjenHU0pF2s+4/NH8CQn/kla6+Hvws+2AF7bfV5qQ==}
@@ -781,7 +781,7 @@ snapshots:
     dependencies:
       '@babel/types': 7.29.0
 
-  '@webgpu/types@0.1.72': {}
+  '@webgpu/types@0.1.74': {}
 
   babel-plugin-jsx-dom-expressions@0.40.6(@babel/core@7.29.0):
     dependencies:
