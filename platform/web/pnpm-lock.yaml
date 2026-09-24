@@ -25,8 +25,8 @@ importers:
         specifier: ^8.3.0
         version: 8.3.0
       vite-plugin-solid:
-        specifier: ^2.10.0
-        version: 2.11.12(solid-js@1.9.15)(vite@8.3.0)
+        specifier: ^2.11.14
+        version: 2.11.14(solid-js@1.9.15)(vite@8.3.0)
 
 packages:
 
@@ -511,12 +511,12 @@ packages:
     peerDependencies:
       browserslist: '>= 4.21.0'
 
-  vite-plugin-solid@2.11.12:
-    resolution: {integrity: sha512-FgjPcx2OwX9h6f28jli7A4bG7PP3te8uyakE5iqsmpq3Jqi1TWLgSroC9N6cMfGRU2zXsl4Q6ISvTr2VL0QHpA==}
+  vite-plugin-solid@2.11.14:
+    resolution: {integrity: sha512-7ZVBt8rpoyqmlwin2kRIUveaHoF6/kulY7gsnD+qFh4nS29V4OPAnw+ojoAspXIjObiL9o1xh9a/nTuYHm02Rw==}
     peerDependencies:
-      '@testing-library/jest-dom': ^5.16.6 || ^5.17.0 || ^6.*
+      '@testing-library/jest-dom': ^5.16.6 || ^5.17.0 || ^6.0.0 || ^7.0.0
       solid-js: ^1.7.2
-      vite: ^3.0.0 || ^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0
+      vite: ^3.0.0 || ^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0 || ^9.0.0
     peerDependenciesMeta:
       '@testing-library/jest-dom':
         optional: true
@@ -993,7 +993,7 @@ snapshots:
       escalade: 3.2.0
       picocolors: 1.1.1
 
-  vite-plugin-solid@2.11.12(solid-js@1.9.15)(vite@8.3.0):
+  vite-plugin-solid@2.11.14(solid-js@1.9.15)(vite@8.3.0):
     dependencies:
       '@babel/core': 7.29.0
       '@types/babel__core': 7.20.5
