@@ -1014,6 +1014,17 @@ Voland's maintainer wrote a Tier-1 WASM backend design for Ballistic (Round 4, J
 
 The full `wasm_jit` spec (`docs/WASM_JIT.md`) is written when Phase 5 opens, from this list plus requirements 1–7, and goes through header review with `wasm_jit`'s interface header.
 
+### Engine features beyond baseline WASM (status as of October 2026)
+
+`wasm_jit` targets baseline WASM 3.0 plus the features below. Each one either degrades silently or is feature-detected at boot with a baseline fallback. Nothing here is a hard requirement.
+
+- **Branch hinting** (standardized; supported by all three engines once Firefox un-flags it). A custom section marks an `if` as likely or unlikely. `wasm_jit` marks the softmmu slow path, fault exits and budget-expiry exits as unlikely, so engines lay out the hot path contiguously. Engines without support ignore the section, so the same bytes run everywhere: no feature detection and no cache-key impact. Adopted in tier 1.
+- **Wide arithmetic** (`i64.add128`, `i64.sub128`, `i64.mul_wide_s/u`). Firefox ships it from 155. Blink and WebKit have implemented it but not shipped it, as of Mozilla's August 2026 intent. `UMULH`/`SMULH` lower to one `mul_wide` instead of a four-multiply emulation. The C (carry) and V (overflow) flags of `ADDS`/`ADCS`/`SUBS`/`SBCS` come from the high word of a 128-bit add/sub, instead of compare-and-select sequences. **Feature-detected** (`WebAssembly.validate` on a probe module at boot) with a baseline fallback emission. Because the same region then emits different bytes per engine, the detected feature set is part of the translation-cache key (§11).
+- **Relaxed SIMD** (standardized in WASM 3.0): **not used for anything ARM defines exactly.** `relaxed_madd` may be fused or unfused depending on the host, while ARM `FMLA`/`FMADD` are always fused. Using it would make guest FP results machine-dependent, which breaks differential testing and determinism. Revisit per instruction only where ARM itself permits implementation-defined results.
+- **Tail calls** (WASM 3.0): not needed. Regions are single functions (§11).
+- **JSPI**: not needed. Nothing in Voland blocks inside WASM (§7).
+- **JIT interface proposal** (WebAssembly/jit-interface, making dynamic code generation a core feature): watch item. Until it ships, late linking (modules importing the core's memory and `funcref` table, §11) is the standard technique.
+
 ### Ideas inherited from Ballistic
 
 Ideas only. Hard rule 2 applies to Ballistic exactly as to any emulator: read for behavior, reimplement, never copy. Inherited:
@@ -1123,7 +1134,7 @@ flowchart TD
 
 ### Cache keying
 
-**Key = `hash(region code bytes) + ir_build_id + backend_version`, namespaced by titleId.** Not guest address: ASLR and title updates make GVAs unstable and collision-prone. The GVA lives in the in-memory block-cache *entry*, never in the persistent key. `ir_build_id` covers any translator change that alters emitted bytes for identical input (peephole rules, register-local allocation, a future IR pass); `wasm_jit` bumps it whenever its golden emission tests change.
+**Key = `hash(region code bytes) + ir_build_id + backend_version + engine_features`, namespaced by titleId.** `engine_features` is the bitset of feature-detected emission paths in use (§10, e.g. wide arithmetic). Bytes emitted for one engine must never be served to another engine that lacks the feature, since they would fail validation. Not guest address: ASLR and title updates make GVAs unstable and collision-prone. The GVA lives in the in-memory block-cache *entry*, never in the persistent key. `ir_build_id` covers any translator change that alters emitted bytes for identical input (peephole rules, register-local allocation, a future IR pass); `wasm_jit` bumps it whenever its golden emission tests change.
 
 ### Persistence reality
 
@@ -2484,6 +2495,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 - **The seven v3.27 contract items become `wasm_jit`'s own requirements**, unchanged in substance. Item 3's "constants Ballistic picks" is now "constants baked into the translator".
 - **Desktop WASM path stated:** the web build in a desktop browser. Native builds do not embed a WASM engine: region modules need the core's memory and `funcref` table, which a native core does not have.
 - **Ideas inherited from Ballistic, listed in §10 under hard rule 2** (ideas only, never code): Unicorn differential fuzzing, a decoder generated from ARM's A64 XML spec, tier-1 sliding-window peephole, structured SSA held in reserve, and cache-footprint rules for C hot paths. Rejected ideas are listed alongside, with reasons.
+- **§10 "Engine features beyond baseline WASM":** branch hinting is adopted in tier 1 (silently ignored where unsupported). Wide arithmetic is feature-detected for `UMULH`/`SMULH` and carry/overflow flags, and its feature bit joins the §11 cache key. Relaxed SIMD is excluded for exactly-defined ARM ops (fusion differs by host). Tail calls and JSPI are not needed, and the JIT interface proposal is a watch item.
 - **§11 region shape fixed:** a region is one function (a `loop` around a `br_table` over its blocks), not one function per block. Per-block functions linked by direct calls overflowed the WASM stack on guest loops. Tail calls (`return_call`) are recorded as the rejected alternative.
 - **§10 "Carried forward from the 2026 WASM backend draft":** the maintainer's own Tier-1 WASM design for Ballistic is reused. It contributes the three-layer split, inline emitters with a per-instruction capacity check, all-`i64` locals with width at the operation, padded-LEB size patching, branch-free ARM division semantics, layered tests, and the landing order. Its flat-memory, per-block-module, `() → ()`, `unreachable`-trap, SharedWorker and GVA-cache-key decisions are listed as superseded by §5/§10/§11, with reasons.
 - **Ripple edits:** §1 overview and recompiler dependency, §2 tree (`backends/wasm_jit/`), §7 yield wording, §8 backend diagram, §11 flow and `ir_build_id` meaning, §15 `backendVersion` comment, §17 differential-run wording, §24 option list and build targets, §25 Phase 2 interpreter line and Phase 5 tasks (`wasm_jit` tier 1 and the PTC first cut move to the web; ballistic-x86 is optional), §26 contributor pointer, §27 Ballistic entry, §28 risk rows. No code or header changes; `cpu.h`'s `CPU_BACKEND_WASM_JIT` declaration arrives with the Phase 5 header review.
