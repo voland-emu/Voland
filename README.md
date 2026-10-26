@@ -1,8 +1,8 @@
 # Voland
 
-A Nintendo Switch emulator targeting the web as a primary platform, with native apps on iOS, Android, macOS, tvOS, Windows, Linux, and Xbox.
+A Nintendo Switch emulator targeting the web as a primary platform, with native apps on iOS, Android, macOS, tvOS, Windows, and Linux.
 
-Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
+Play Switch games in your browser. No installation. No setup beyond providing your own decrypted game files.
 
 > **Status:** Early development — **Phase 1 (Load & Memory)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 0 (skeleton) is complete: the linear-memory layout, no-op CPU backend, SVC/HLE dispatcher stub, and web boot path (single shared memory, COOP/COEP, Workers) all build and pass CI natively and under Emscripten. The softmmu (`core/common/vmm`), the decrypted-NCA parsers (`core/hle/loader`: NCA container, ExeFS, RomFS, npdm — pre-decrypted input only, per §1.6), the NSO loader (LZ4 via vendored `core/third_party/lz4`), the process bootstrap (`core/hle/kernel`: NSOs mapped through vmm at an ASLR'd base, Horizon region layout, main-thread stack and entry ABI — `emulator_load_program` runs the whole path), TLS allocation with `tpidrro_el0` plumbing (`tls.{h,c}` per-process block allocator, `thread.{h,c}` thread objects), and the memory SVCs (`hle/kernel/svc_memory.{h,c}`: SetHeapSize, MapMemory, UnmapMemory, QueryMemory as thin layers over vmm) have landed; next is the minimal IPC + sm: stub. Nothing executes guest code yet — the interpreter is a Phase 2 goal.
 
@@ -12,9 +12,9 @@ Play Switch games in your browser. No installation. No setup beyond providing yo
 
 Every existing Switch emulator requires installation, driver configuration, and technical setup that eliminates most potential users before they ever reach a game. Voland's primary target is a browser tab - click a link, provide your decrypted game files, play.
 
-The web version is not a port of a native emulator. It is designed from the ground up for the browser, using a WASM-compiled C core, WebGPU rendering, SharedArrayBuffer for guest RAM, and a dedicated Worker per emulator subsystem.
+The web version is not a port of a native emulator. It is designed from the ground up for the browser, using a WASM-compiled C core, WebGPU rendering, guest RAM as a region inside the core's single shared linear memory, and a dedicated Worker per emulator subsystem.
 
-Native apps on iOS, Android, macOS, tvOS, Windows, Linux, and Xbox share the same C core with thin platform-specific UI and renderer layers on top.
+Native apps on iOS, Android, macOS, tvOS, Windows, and Linux share the same C core with thin platform-specific UI and renderer layers on top.
 
 ---
 
@@ -22,10 +22,9 @@ Native apps on iOS, Android, macOS, tvOS, Windows, Linux, and Xbox share the sam
 
 To play games you must provide:
 
-- **prod.keys** - cryptographic keys dumped from your own Nintendo Switch using [Lockpick_RCM](https://github.com/s1204IT/Lockpick_RCM)
-- **Game files** - NSP or XCI files dumped from cartridges or digital purchases you own
+- **Decrypted game files** - NCA files dumped from cartridges or digital purchases you own, and decrypted beforehand with separate tools on your own PC
 
-Voland does not and will never distribute keys, firmware, or game files. These must come from hardware you own. See the [dumping guide](docs/DUMP.md) for instructions.
+Voland never asks for keys, never reads NSP or XCI files, and contains no decryption code ([DESIGN.md §1.6](docs/DESIGN.md#16-legal-scope-boundaries)). It does not and will never distribute keys, firmware, or game files. See the [dumping guide](docs/DUMP.md) for instructions.
 
 ---
 
