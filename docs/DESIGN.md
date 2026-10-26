@@ -984,6 +984,36 @@ These were filed against Ballistic as design input in v3.27. They are now Voland
 6. **Region-granularity modules**, not per-block modules. See §11.
 7. **Shared, memory64 memory type.** Emitted modules import a shared memory with the memory64 flag and matching limits, or instantiation throws.
 
+### Carried forward from the 2026 WASM backend draft
+
+Voland's maintainer wrote a Tier-1 WASM backend design for Ballistic (Round 4, July 2026) before upstream dropped the IR. It is Voland's own work, so it is reused directly, not under the rule-2 constraint. Its IR coupling is gone (input is decoded ARM64, not `bal_ir_block_t`). The following carry over into the `wasm_jit` spec:
+
+- **Three strictly separated layers.** The *assembler* does byte emission and knows nothing of ARM. The *module builder* handles the envelope and sections and knows nothing of ARM semantics. The *translator* does ARM64 dispatch and knows nothing of WASM byte encoding. Each layer is independently testable.
+- **Hot-path emission contract.** Fixed-opcode emitters are `static inline` with no per-call checks. The translator reserves worst-case bytes **once per guest instruction** and checks status once per instruction. LEB128 helpers are out of line.
+- **All locals `i64`; width is a property of the operation.** A 32-bit ARM op lowers as `i32.wrap_i64` on each source, the `i32.*` op, then `i64.extend_i32_u`. That zero-extension *is* the W-write-clears-upper-X rule. Sign extension happens only where the instruction asks for it. One local group means the locals declaration is known before emission.
+- **Forward size fields as 5-byte padded LEB128**, patched after emission: each function body's size first, then the code section's size. Nothing is shifted.
+- **ARM-defined division results, branch-free.** WASM `div_*` traps where `SDIV`/`UDIV` define results. Lowering: `d' = (d == 0) ? 1 : d`; for signed, additionally `d' = (n == INT_MIN && d == −1) ? 1 : d'` (n / 1 = INT_MIN, ARM's defined result). Then `q = n / d'` and `result = (d == 0) ? 0 : q`, all via `select`, with no control flow.
+- **Alignment hints:** `align=0` for guest accesses (ARM64 permits unaligned access), and natural alignment for register-file accesses, which are aligned by construction.
+- **Bitfield moves:** UBFM/SBFM/EXTR get a general lowering, with fast paths for the aliases the generated decoder identifies (LSL/LSR/ASR/ROR). This answers the draft's Q-B without an IR.
+- **The 50,000-locals-per-function JS API cap** stays a stated limit. It does not bind once locals hold guest registers plus a few temporaries instead of one per IR slot.
+- **Layered tests:** golden bytes for the assembler (no runtime), a validation round-trip for the module builder, and differential execution for the translator. Voland uses Node for both validation (`WebAssembly.validate`) and execution, so there is no new CI dependency on Wasmtime or `wasm-tools`.
+- **Bisectable landing order:** assembler → module builder → translator, each commit with its tests.
+
+**Superseded by Voland's contracts:**
+
+| Draft decision | Replaced by | Why |
+|---|---|---|
+| Guest address = linear-memory offset; `iN.load offset=0` on the guest address | Requirement 2: every access walks the §5 page table | No GVA identity exists (§1, load-bearing decision 2) |
+| Fixed `BAL_REGFILE_BASE` above a 4GB guest window | Requirement 3: register-file base from `layout_get()` | Collision avoidance is the layout's job (§4) |
+| One module per block | Requirement 6: region modules | One `WebAssembly.compile` per block, plus a JS bounce per inter-block jump |
+| Signature `() → ()`, next PC stored to a slot | Requirement 4: `() → i64` returns the next PC | The draft's objection (cap-terminated blocks fall off the end with an empty stack) is resolved by emitting `i64.const next_pc` before the body's `end`. The returned PC is what the dispatcher's `call_indirect` chains on (§11). |
+| `OPCODE_TRAP` → store reason, `unreachable` (draft Q-A: not resumable) | Requirement 4: write the mailbox, then `return` | Return-based exits make every fault resumable without a function import. Cost: a fault exit must first write back guest registers held in locals. Precise state at a softmmu miss is a spec item. |
+| Memory-only import | Requirement 5: memory **and** the core's `funcref` table | Needed for inter-region `call_indirect` without JS |
+| Compiler *Shared* Worker | Dedicated Compiler Worker (§11) | SharedWorkers are a separate agent cluster and cannot hand Modules back |
+| Cache key `(guest_address, ir_build_id)` | Content-hash key (§11) | GVAs are unstable under ASLR and title updates |
+
+The full `wasm_jit` spec (`docs/WASM_JIT.md`) is written when Phase 5 opens, from this list plus requirements 1–7, and goes through header review with `wasm_jit`'s interface header.
+
 ### Ideas inherited from Ballistic
 
 Ideas only. Hard rule 2 applies to Ballistic exactly as to any emulator: read for behavior, reimplement, never copy. Inherited:
@@ -2451,6 +2481,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 - **The seven v3.27 contract items become `wasm_jit`'s own requirements**, unchanged in substance. Item 3's "constants Ballistic picks" is now "constants baked into the translator".
 - **Desktop WASM path stated:** the web build in a desktop browser. Native builds do not embed a WASM engine: region modules need the core's memory and `funcref` table, which a native core does not have.
 - **Ideas inherited from Ballistic, listed in §10 under hard rule 2** (ideas only, never code): Unicorn differential fuzzing, a decoder generated from ARM's A64 XML spec, tier-1 sliding-window peephole, structured SSA held in reserve, and cache-footprint rules for C hot paths. Rejected ideas are listed alongside, with reasons.
+- **§10 "Carried forward from the 2026 WASM backend draft":** the maintainer's own Tier-1 WASM design for Ballistic is reused. It contributes the three-layer split, inline emitters with a per-instruction capacity check, all-`i64` locals with width at the operation, padded-LEB size patching, branch-free ARM division semantics, layered tests, and the landing order. Its flat-memory, per-block-module, `() → ()`, `unreachable`-trap, SharedWorker and GVA-cache-key decisions are listed as superseded by §5/§10/§11, with reasons.
 - **Ripple edits:** §1 overview and recompiler dependency, §2 tree (`backends/wasm_jit/`), §7 yield wording, §8 backend diagram, §11 flow and `ir_build_id` meaning, §15 `backendVersion` comment, §17 differential-run wording, §24 option list and build targets, §25 Phase 2 interpreter line and Phase 5 tasks (`wasm_jit` tier 1 and the PTC first cut move to the web; ballistic-x86 is optional), §26 contributor pointer, §27 Ballistic entry, §28 risk rows. No code or header changes; `cpu.h`'s `CPU_BACKEND_WASM_JIT` declaration arrives with the Phase 5 header review.
 
 ### Changelog v3.26 → v3.27 (summary)
