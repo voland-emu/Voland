@@ -27,6 +27,7 @@
 
 #include "common/vmm.h"
 #include "cpu/cpu.h"
+#include "hle/kernel/ipc.h"
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/process.h"
 
@@ -60,6 +61,20 @@ typedef struct HLE_Context
   VMM_Context *vmm;      /* softmmu (§5); the only guest-memory gateway memory SVCs use */
   Process *process;      /* the loaded process (§12); valid once emulator_load_program() has run */
   Page_Allocator *pages; /* guest physical pages (§4), shared with the bootstrap */
+  /* Phase 1 handle-table stand-in for IPC sessions only (ipc.h's "KNOWN
+   * SIMPLIFICATION"); discarded whole when the Phase 2 generic handle
+   * table (process.h) lands. Zeroed by hle_context_init; callers must
+   * additionally call ipc_session_table_init(&context->sessions) before
+   * the first ConnectToNamedPort - not done implicitly here so this
+   * header does not have to include ipc.c's init ordering assumptions. */
+  IPC_Session_Table sessions;
+  /* The object ConnectToNamedPort("sm:") binds a new session to - see
+   * svc_ipc.c. Owned by whoever calls hle_context_init's caller
+   * (emulator.c binds it to an Emulator-owned SM_Context via
+   * sm_make_service_object(), sm.h); HLE_Context itself only stores the
+   * Service_Object value, keeping this generic dispatch layer from
+   * depending on any one service's header. */
+  Service_Object sm_object;
   uint64_t svc_call_count;
 } HLE_Context;
 

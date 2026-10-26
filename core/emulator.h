@@ -17,6 +17,7 @@
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/process.h"
 #include "hle/loader/byte_source.h"
+#include "hle/services/sm/sm.h"
 
 /* Scratch for one bootstrap: the ExeFS directory plus the largest
  * compressed NSO segment staged for LZ4. A shipping title's biggest
@@ -35,6 +36,12 @@ typedef struct Emulator
    * scheduler (§7) exists to multiplex real ones. */
   CPU_State *cpu_state;
   HLE_Context hle;
+
+  /* sm:'s host-side registry (sm.h). Outlives any one program load - a
+   * service module registers with it once at the point it comes online
+   * (none do yet, Phase 1), not per emulator_load_program() call.
+   * hle.sm_object is bound to this at emulator_create() time. */
+  SM_Context sm;
 
   /* Guest physical pages (§4) and the loaded process (§12). `process`
    * is valid only while `program_loaded` is true. */

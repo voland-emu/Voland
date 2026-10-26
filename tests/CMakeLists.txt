@@ -72,3 +72,21 @@ add_test(NAME thread_test COMMAND thread_test)
 add_executable(svc_memory_test svc_memory_test.c)
 target_link_libraries(svc_memory_test PRIVATE switch_core loader_fixtures)
 add_test(NAME svc_memory_test COMMAND svc_memory_test)
+
+#
+# core/hle/kernel/ipc + core/hle/services/sm (§25 Phase 1 "Minimal IPC +
+# sm: stub"): ipc_test and sm_test are pure unit tests (no vmm/CPU
+# backend - ipc.h/sm.h's design goal); svc_ipc_test is the SVC-path test,
+# driven through hle_on_svc like svc_memory_test.c.
+#
+add_executable(ipc_test ipc_test.c)
+target_link_libraries(ipc_test PRIVATE switch_core)
+add_test(NAME ipc_test COMMAND ipc_test)
+
+add_executable(sm_test sm_test.c)
+target_link_libraries(sm_test PRIVATE switch_core)
+add_test(NAME sm_test COMMAND sm_test)
+
+add_executable(svc_ipc_test svc_ipc_test.c)
+target_link_libraries(svc_ipc_test PRIVATE switch_core loader_fixtures)
+add_test(NAME svc_ipc_test COMMAND svc_ipc_test)

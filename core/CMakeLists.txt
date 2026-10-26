@@ -12,8 +12,11 @@ set(SWITCH_CORE_SOURCES
   hle/kernel/address_space.c
   hle/kernel/process.c
   hle/kernel/svc_memory.c
+  hle/kernel/ipc.c
+  hle/kernel/svc_ipc.c
   hle/kernel/tls.c
   hle/kernel/thread.c
+  hle/services/sm/sm.c
   hle/loader/byte_source.c
   hle/loader/nca_parse.c
   hle/loader/exefs.c
@@ -55,8 +58,11 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/kernel/address_space.h
   hle/kernel/process.h
   hle/kernel/svc_memory.h
+  hle/kernel/ipc.h
+  hle/kernel/svc_ipc.h
   hle/kernel/tls.h
   hle/kernel/thread.h
+  hle/services/sm/sm.h
   hle/loader/byte_source.h
   hle/loader/nca_parse.h
   hle/loader/exefs.h

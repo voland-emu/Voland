@@ -19,6 +19,8 @@ typedef enum Result
   RESULT_MEMORY_FAULT = 6,    /* guest VA unmapped / permission denied (vmm, §5) */
   RESULT_NOT_CONTIGUOUS = 7,  /* vmm_guest_to_host: range spans non-adjacent host pages */
   RESULT_ENCRYPTED_INPUT = 8, /* loader: input is not pre-decrypted (§1.6); message names docs/DUMP.md */
+  RESULT_ALREADY_EXISTS = 9,  /* a registration/entry under that key already exists (host-side
+                               * counterpart to hle.h's guest-facing HLE_RESULT_ALREADY_EXISTS) */
 } Result;
 
 typedef struct Error
