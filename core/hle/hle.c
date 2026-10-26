@@ -1,6 +1,7 @@
 #include "hle/hle.h"
 #include "common/assert.h"
 #include "common/log.h"
+#include "hle/kernel/svc_ipc.h"
 #include "hle/kernel/svc_memory.h"
 
 #include <stddef.h>
@@ -102,11 +103,11 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
    * each call keeps at most one borrow live at a time regardless of how
    * many pages a handler walks. */
 
-  /* §12's dispatch table, Phase 1 slice: the four memory SVCs this
-   * checkbox implements (thin layers over vmm/process/pages - see
-   * hle/kernel/svc_memory.h) plus the §12 unimplemented-surface policy
-   * default arm for everything else: log, then HLE_RESULT_NOT_IMPLEMENTED
-   * in W0. */
+  /* §12's dispatch table, Phase 1 slice: the four memory SVCs
+   * (hle/kernel/svc_memory.h) plus the three IPC SVCs this checkbox
+   * implements (hle/kernel/svc_ipc.h), plus the §12 unimplemented-surface
+   * policy default arm for everything else: log, then
+   * HLE_RESULT_NOT_IMPLEMENTED in W0. */
   switch (swi)
   {
   case 0x01:
@@ -120,6 +121,15 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
     break;
   case 0x06:
     hle_svc_query_memory(context, cpu_state);
+    break;
+  case 0x1F:
+    hle_svc_connect_to_named_port(context, cpu_state);
+    break;
+  case 0x21:
+    hle_svc_send_sync_request(context, cpu_state);
+    break;
+  case 0x26:
+    hle_svc_close_handle(context, cpu_state);
     break;
   default:
     log_warn("[hle] SVC 0x%02x (%s) at PC 0x%016llx - unimplemented",

@@ -57,6 +57,14 @@ Error emulator_create(Emulator* out) {
   out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
   out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
 
+  /* 6. IPC (§25 Phase 1 "Minimal IPC + sm: stub"): the Phase 1 session
+   * table (ipc.h) and sm:'s registry, bound to the well-known port
+   * ConnectToNamedPort("sm:") resolves to (svc_ipc.c). No service module
+   * registers with it yet - none exist before Phase 2+. */
+  ipc_session_table_init(&out->hle.sessions);
+  sm_context_init(&out->sm);
+  out->hle.sm_object = sm_make_service_object(&out->sm);
+
   log_info("[emulator] created (backend=%s %s)",
            out->cpu_backend->name,
            out->cpu_backend->version);

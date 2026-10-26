@@ -228,7 +228,10 @@ voland/
         thread.{h,c}         # guest thread objects: CPU_State + TLS block,
                              # tpidrro_el0 armed once at creation
         sync.{h,c}           # kernel sync objects (events, mutexes, arbiters)
-        ipc.{h,c}
+        ipc.{h,c}            # HIPC/CMIF framing + service-object dispatch (§12);
+                             # split from the SVCs themselves in v3.30, mirroring
+                             # the memory.{h,c}/svc_memory.{h,c} split above
+        svc_ipc.{h,c}        # ConnectToNamedPort, SendSyncRequest, CloseHandle
       services/
         sm/ fsp/ audio/ hid/ nfc/ network/ nvdrv/ vi/ time/ applet/
         account/ friends/ ssl/
