@@ -90,7 +90,7 @@ To keep the project focused, several things are explicitly NOT goals. Contributo
 
 - **Day-one Switch 2 support.** Switch 2 is a future target, not a current one. Voland's architecture extends to Switch 2 (the softmmu and memory64 address space are already in place), but the project is not racing to be first.
 
-- **Hosting games or distributing Nintendo IP.** Voland never includes, distributes, or operates infrastructure that touches Nintendo's copyrighted material. Users provide their own keys, their own decrypted game files, from hardware they own. See §1.6 for the legal scope this implies.
+- **Hosting games or distributing Nintendo IP.** Voland never includes, distributes, or operates infrastructure that touches Nintendo's copyrighted material. Users provide their own decrypted game files, dumped from hardware they own and decrypted beforehand with separate tools; Voland never sees keys. See §1.6 for the legal scope this implies.
 
 - **Wii U, GameCube, or other console emulation.** The architecture is Switch-specific.
 
