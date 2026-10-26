@@ -129,7 +129,7 @@ summarized:
    parsing of encrypted NSP/XCI. The loader consumes pre-decrypted NCA only
    (§1.6). If a task seems to require decryption, stop and say so instead
    of implementing it.
-2. **Never copy code** from Ryubing, yuzu, dynarmic, or any other emulator.
+2. **Never copy code** from Ryubing, yuzu, dynarmic, Ballistic, or any other emulator or recompiler.
    Read them for behavior; reimplement from the observed behavior.
 3. The three load-bearing architectural decisions are fixed — don't
    "simplify" around them: one linear memory (no separate `SharedArrayBuffer`
@@ -150,7 +150,10 @@ summarized:
 9. No aggregation servers, no cloud cache, no telemetry, no code that
    connects to Nintendo's servers or ships Nintendo endpoints/DNS
    names/certificates (§1.6, §15, §20). Mod repos are mechanism only.
-10. `core/cpu/backends/ballistic/**` and `recompiler/` are off-limits until
+10. The web JIT is Voland's own `core/cpu/backends/wasm_jit/` (§10), a
+    Phase 5 deliverable written to a reviewed header. Ballistic is ideas
+    only, never code. `recompiler/` (Ballistic) is never modified, forked,
+    or vendored. `core/cpu/backends/ballistic/**` is off-limits until
     unlocked by the maintainer.
 
 ## Review tripwires
@@ -183,9 +186,9 @@ and the guest thread scheduler (§7) — they gate almost everything else —
 followed by HLE services from the §12 priority list. Use Ryubing's C#
 implementations as a behavioral reference only (see hard rule 2).
 
-**Compiler engineering:** the Ballistic WASM backend, once unlocked (see
-hard rule 10). Join the Pound Discord and engage on IR design before it
-solidifies; the integration contract is §10.
+**Compiler engineering:** `wasm_jit`, Voland's ARM64→WASM translator (see
+hard rule 10). It opens in Phase 5. Its requirements are DESIGN.md §10's
+seven items, and its interface header goes through header review first.
 
 ## Code review requirements
 

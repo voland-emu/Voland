@@ -60,18 +60,19 @@ Full architecture documentation: [DESIGN.md](docs/DESIGN.md)
 
 ## Recompiler
 
-The primary recompiler target is [Ballistic](https://github.com/pound-emu/ballistic), a C rewrite of dynarmic currently in early development. Ballistic targets the specific performance bottlenecks in dynarmic - JIT state cache line overflow, block eviction pathology, heavy IR memory footprint, and missing peephole optimisation.
+The primary recompiler target is `wasm_jit`, Voland's own ARM64→WASM translator, planned for Phase 5 ([DESIGN.md §10](docs/DESIGN.md#10-jit-backends)). [Ballistic](https://github.com/pound-emu/ballistic), a C ARM64 recompiler with an x86 backend, is an optional desktop backend consumed unmodified.
 
-The CPU backend vtable means Voland is not blocked on Ballistic. Current backend status:
+The CPU backend vtable means Voland is not blocked on any recompiler. Current backend status:
 
 | Backend | Status | Notes |
 |---|---|---|
 | noop | Complete | Default - everything except game execution is testable |
 | interpreter | Planned | Slow but correct, unblocks homebrew |
 | dynarmic | Planned | Interim desktop backend - archived upstream, requires patching for GCC 14 |
-| ballistic | Planned | Primary target, wired in when instruction coverage is sufficient |
+| wasm_jit | Planned (Phase 5) | Primary target on web - direct ARM64 → WASM translation |
+| ballistic | Optional | Desktop x86 only, wired in when upstream instruction coverage is sufficient |
 
-The WASM JIT pipeline - ARM bytecode → WASM bytecode → `WebAssembly.compile()` → cached module - is architecturally proven. Ballistic providing a WASM bytecode emission backend makes Voland the only Switch emulator that runs natively in a browser, on iOS without App Store restrictions, and on Xbox UWP. No other ARM recompiler targets this deployment surface.
+The WASM JIT pipeline - ARM bytecode → WASM bytecode → `WebAssembly.compile()` → cached module - is architecturally proven ([`poc/02_wasm_pipeline`](poc/)); `wasm_jit` is the translator that feeds it.
 
 ---
 
@@ -155,7 +156,7 @@ cmake -B build -DCPU_BACKEND=ballistic
 
 **If you know C:** The HLE service layer needs contributors. Pick any unimplemented service from the priority list in [DESIGN.md](docs/DESIGN.md#8-hle-service-layer) and implement it in C. Study [Ryubing](https://github.com/Ryubing) as a reference for service behaviour - reimplement in C, do not copy code.
 
-**If you know compiler engineering:** The highest-leverage contribution is the Ballistic WASM bytecode emission backend. Join the [Pound Discord](https://discord.gg/aMmTmKsVC7) and engage on IR design before it solidifies. The three requirements are documented in [DESIGN.md](docs/DESIGN.md#7-ballistic-integration-plan).
+**If you know compiler engineering:** The highest-leverage contribution is `wasm_jit`, Voland's ARM64 → WASM translator. It opens in Phase 5; its requirements are documented in [DESIGN.md §10](docs/DESIGN.md#10-jit-backends).
 
 ### Standards
 

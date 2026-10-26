@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Voland: Nintendo Switch emulator, web-first (WASM/WebGPU), C11 core, thin
-platform layers. The authoritative design is `docs/DESIGN.md` (v3.27.0).
+platform layers. The authoritative design is `docs/DESIGN.md` (v3.28.0).
 Read §1 before any task. Read the section governing your task before
 writing code — section numbers are cited below.
 
@@ -18,7 +18,7 @@ adjacent.
    for decryption, implements key derivation, or parses encrypted NSP/XCI.
    The loader consumes pre-decrypted NCA only (§1.6). If a task appears to
    require decryption, STOP and say so instead of implementing it.
-2. **Never copy code** from Ryubing, yuzu, dynarmic, or any other emulator.
+2. **Never copy code** from Ryubing, yuzu, dynarmic, Ballistic, or any other emulator or recompiler.
    Read them for behavior; reimplement from the observed behavior.
 3. The three load-bearing decisions are fixed. Do not "simplify" around them:
    - One linear memory; guest RAM is a region inside it (§4). Never allocate
@@ -47,14 +47,15 @@ adjacent.
    empty. **Mod repos: mechanism only** — no shipped/curated repos, no CORS
    proxy, and no host-side plugin execution (JS/wasm/UI). Mods are
    guest-side data only (§19).
-10. **Off-limits until unlocked by the maintainer:**
-    `core/cpu/backends/ballistic/**`. Ballistic is a separate upstream
-    project; its WASM backend is paused and its IR API is unstable per its
-    maintainer. Do not write code against Ballistic's IR, vendor its
-    headers, implement a homegrown WASM emitter, or modify anything under
-    `recompiler/`. The web execution path is the interpreter (predecoded
-    form from Phase 5). Desktop ballistic-x86 integration unlocks
-    separately, also by the maintainer.
+10. **JIT backends (§10).** The web JIT is Voland's own ARM64→WASM
+    translator, `core/cpu/backends/wasm_jit/`, a Phase 5 deliverable. It is
+    written to its own reviewed header and spec. Ballistic informs it as
+    ideas only (rule 2), never code. No `wasm_jit` code before Phase 5
+    opens. Ballistic is an optional desktop x86 backend consumed
+    unmodified: never modify, fork, patch, or vendor anything under
+    `recompiler/`, and `core/cpu/backends/ballistic/**` stays off-limits
+    until the maintainer unlocks it. Until a JIT lands, the execution path
+    on every platform is the interpreter (predecoded form from Phase 5).
 
 ## Workflow
 
@@ -128,4 +129,4 @@ A hit is either a bug or needs a written justification in the PR.
 - `core/cpu/dispatch.{h,c}` — JIT block dispatcher (§11). Phase 5.
 - `docs/GPU_COMMAND_STREAM.md` — versioned CPU→GPU record format (§13).
   Any change to `command_stream.h` bumps the version and updates this doc.
-- Reference implementations table: DESIGN.md §26. Behavior only; rule 2.
+- Reference implementations table: DESIGN.md §27. Behavior only; rule 2.

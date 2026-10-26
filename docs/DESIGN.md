@@ -17,7 +17,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 7. [Guest Thread Scheduling](#7-guest-thread-scheduling)
 8. [CPU Backend Interface](#8-cpu-backend-interface)
 9. [No-Op Backend](#9-no-op-backend)
-10. [Ballistic Integration Plan](#10-ballistic-integration-plan)
+10. [JIT Backends](#10-jit-backends)
 11. [JIT Compilation Pipeline](#11-jit-compilation-pipeline)
 12. [HLE Service Layer](#12-hle-service-layer)
 13. [GPU Architecture](#13-gpu-architecture)
@@ -55,7 +55,7 @@ A Nintendo Switch 1 (and eventually Switch 2) emulator targeting all major platf
 
 - WASM as a primary JIT emission target, not a port
 - WebGPU renderer built from the start, not retrofitted
-- CPU backend is an abstract vtable, the recompiler (Ballistic) slots in when ready, interpreter used until then
+- CPU backend is an abstract vtable, the recompiler (Voland's own `wasm_jit` on web, optionally Ballistic on desktop) slots in when ready, interpreter used until then
 - All platform layers are thin, the C core does the work, platforms provide surfaces
 - Web version is not a second-class citizen, it is the primary distribution mechanism
 
@@ -69,15 +69,16 @@ Everything else in this document is downstream of these. They are stated up fron
 
 ### Recompiler dependency
 
-The primary recompiler target is **Ballistic** (github.com/pound-emu/ballistic), a C rewrite of dynarmic currently in early development. The architecture is explicitly designed so that Ballistic is a replaceable component behind an abstract interface. The project is fully buildable and testable with:
+The primary recompiler target is **`wasm_jit`**, Voland's own ARM64→WASM translator (§10, Phase 5). **Ballistic** (github.com/pound-emu/ballistic) is an optional desktop x86 backend, consumed unmodified. Every recompiler is a replaceable component behind an abstract interface. The project is fully buildable and testable with:
 
 - **No-op backend** (default), for building and testing everything except actual game execution
 - **Interpreter backend**, slow but correct, unblocks homebrew and HLE testing
-- **Ballistic backend**, primary target, wired in when instruction coverage is sufficient
+- **wasm_jit backend**, primary target on web, wired in when instruction coverage is sufficient
+- **Ballistic backend**, optional on desktop, wired in when upstream coverage is sufficient
 
-dynarmic is no longer an interim target. Ballistic-x86 replaces it on desktop when coverage suffices; the interpreter covers the gap. This removes the only C++ dependency from core.
+dynarmic is no longer an interim target; the interpreter covers the gap on desktop. This removes the only C++ dependency from core.
 
-**Nothing in the project except playable performance depends on Ballistic being complete.**
+**Nothing in the project except playable performance depends on any recompiler being complete.**
 
 ---
 
@@ -196,7 +197,8 @@ voland/
       backends/
         noop/                # default, always builds
         interpreter/         # ARM64 interpreter
-        ballistic/           # Ballistic integration (x86 + wasm)
+        wasm_jit/            # Voland's ARM64→WASM translator (§10, Phase 5)
+        ballistic/           # optional Ballistic x86 integration (§10)
     hle/
       hle.h
       hle.c                  # syscall dispatch table
@@ -302,7 +304,7 @@ voland/
                              # save-sync backend, TURN pairing. User-hosted only;
                              # Voland operates no instance. User-owned data only.
 
-  recompiler/                # Ballistic git submodule
+  recompiler/                # Ballistic git submodule (unmodified, §10)
 
   tests/
     cpu/ hle/ gpu/ games/
@@ -520,7 +522,7 @@ Two dependent loads plus masking. The JIT emits this sequence (or a call to a pe
 
 A second later optimization: because Voland controls physical layout, the main heap can usually be mapped contiguously, letting the JIT skip translation for accesses statically provable to land in it. Noted here so nobody designs it in early — it is an optimization on top of a correct softmmu, not a substitute for one.
 
-The intersection-targeting cost (§3), named: **native builds forgo host-`mmap` fastmem** — the page-aliasing scheme that gives mature native emulators near-free guest access — so that one memory model and one JIT lowering run everywhere. A native fastmem backend for vmm is the escape hatch: guest-invisible by definition if correct (it implements the same mapping), but it bifurcates Ballistic's memory-access lowering into two modes, so it is gated exactly like Tier 2 Vulkan and per-core workers — on profiling showing the softmmu is the native bottleneck, and not before Phase 8.
+The intersection-targeting cost (§3), named: **native builds forgo host-`mmap` fastmem** — the page-aliasing scheme that gives mature native emulators near-free guest access — so that one memory model and one JIT lowering run everywhere. A native fastmem backend for vmm is the escape hatch: guest-invisible by definition if correct (it implements the same mapping), but it bifurcates the JIT's memory-access lowering into two modes, so it is gated exactly like Tier 2 Vulkan and per-core workers — on profiling showing the softmmu is the native bottleneck, and not before Phase 8.
 
 ### One MMU, three consumers
 
@@ -707,7 +709,7 @@ typedef enum CPU_ExitReason {
 } CPU_ExitReason;
 ```
 
-Every backend must be able to stop at translation-block boundaries when the budget expires. For the JIT this is a per-block cycle-counter decrement and check at block entry; this is where Ballistic's planned `OPCODE_YIELD` maps. `run(entry_point)`-until-done does not exist in the interface.
+Every backend must be able to stop at translation-block boundaries when the budget expires. For the JIT this is a per-block cycle-counter decrement and check at block entry; this is `wasm_jit` requirement 1 (§10). `run(entry_point)`-until-done does not exist in the interface.
 
 ### Scheduler
 
@@ -756,7 +758,8 @@ flowchart TB
     subgraph BACKENDS["CPU_Backend (vtable)"]
         NOOP["CPU_BACKEND_NOOP<br/>(default, always builds)"]
         INT["CPU_BACKEND_INTERPRETER<br/>(slow but correct)"]
-        BAL["CPU_BACKEND_BALLISTIC<br/>(primary target;<br/>x86 + wasm emitters)"]
+        WJIT["wasm_jit<br/>(primary target, web;<br/>Phase 5, §10)"]
+        BAL["CPU_BACKEND_BALLISTIC<br/>(optional, desktop x86)"]
     end
 
     subgraph CB["Callbacks (set by emulator)"]
@@ -887,7 +890,7 @@ Changes from v2: `create` takes `VMM_Context*` instead of `(guest_ram, ram_size)
 
 The no-op backend is the default. It builds on all platforms with zero dependencies. It maintains register state so HLE services can read and write registers, and it honors the exit-reason contract so the scheduler can be developed against it. It does not execute any ARM instructions.
 
-**Every subsystem except actual game execution can be built and tested with the no-op backend** — the frontend, storage, worker architecture, Service Worker, scheduler, and HLE scaffolding. This decouples Voland's development from Ballistic's development entirely.
+**Every subsystem except actual game execution can be built and tested with the no-op backend** — the frontend, storage, worker architecture, Service Worker, scheduler, and HLE scaffolding. This decouples Voland's development from any recompiler's development entirely.
 
 ```c
 // core/cpu/backends/noop/noop.c (abridged; accessor boilerplate as in v2)
@@ -924,11 +927,22 @@ Tests can drive HLE by setting registers and invoking the SVC handler directly �
 
 ---
 
-## 10. Ballistic Integration Plan
+## 10. JIT Backends
 
-### What Ballistic is
+### Decision (v3.28)
 
-Ballistic ([github.com/pound-emu/ballistic](https://github.com/pound-emu/ballistic)) is a C rewrite of the dynarmic ARM recompiler — a **separate upstream project**, consumed as a submodule, never modified in-tree. Working barebones x86 backend exists in `src/backend/x86/`. **The WASM backend is paused upstream: the maintainer has asked downstream consumers to hold off while the IR API stabilizes.** Voland writes no code against Ballistic's IR — no vendored headers, no homegrown WASM emitter, no fork — until upstream declares it stable. The x86 backend is not paused and remains the desktop JIT path.
+**The web JIT is Voland's own ARM64→WASM translator, `wasm_jit`** (`core/cpu/backends/wasm_jit/`, Phase 5). **Ballistic is an optional desktop x86 backend, consumed unmodified.** Neither is a dependency of anything except playable performance; the interpreter remains the execution path on every platform until a JIT reaches coverage.
+
+Why the v3.27 plan ("wait for Ballistic-WASM") was retired — observed in the Ballistic repository, October 2026:
+
+- **The working backend does not use the IR.** Ballistic's tier-1 x86 compiler decodes ARM64 and emits x86 from per-instruction templates with a sliding-window peephole. The IR in its design doc is not on any executing path.
+- **The IR-based compiler was removed, not paused.** The tier-2 / IR code was deleted upstream on 2026-06-19, with the author's note that it "will need to be rewritten regardless". What v3.27 waited on ("the IR API stabilizes") gates nothing that exists.
+- **There is no WASM work upstream**, and the design-input channel §10 relied on (the Pound Discord) no longer reaches the maintainer. GitHub issues on `pound-emu/ballistic` are the remaining channel.
+- **Ballistic's memory interface is fast-path oriented**: hosts describe guest regions that map linearly to host memory, and the JIT inlines direct loads against them. That is the opposite of §5's every-access-walks-the-softmmu rule. It is workable for an x86 integration (open question below), but it is not a shape the web path can adopt.
+
+**Forking Ballistic was considered and rejected.** It is legally possible (Ballistic and Voland are both GPLv2), but the IR-based Ballistic never existed as a working compiler — the emitter and tier-2 worker were a few hundred lines when removed. "Restoring" it means writing the IR inside someone else's codebase and carrying that divergence against an active upstream. Writing the translator against Voland's own §5/§7/§11 contracts is less work and has no merge cost.
+
+**Why no IR is required for WASM.** An IR's main payoffs — register allocation, constant folding, dead-code elimination — are done by the browser's WASM tiers (Liftoff → TurboFan in V8; equivalents in JSC and SpiderMonkey). What the browser *cannot* do is know ARM semantics, so `wasm_jit`'s optimizations are the ARM-aware ones: guest registers in WASM locals within a block (written back to the linear-memory register file only at exits), lazy NZCV, and coalescing the §5 page walk across accesses to the same page. Tier 1 is direct translation; an IR is added only if profiling shows tier 1 is the bottleneck (see "Structured SSA" below).
 
 ### Backend matrix
 
@@ -936,29 +950,60 @@ Ballistic ([github.com/pound-emu/ballistic](https://github.com/pound-emu/ballist
 flowchart LR
     NOOP["noop<br/>(default, always builds)"]
     INT["interpreter<br/>(unblocks homebrew)"]
-    BX86["ballistic-x86<br/>(desktop JIT)"]
-    BWASM["ballistic-wasm<br/>(browser JIT,<br/>primary target)"]
+    PRE["predecoded interpreter<br/>(all platforms)"]
+    WJIT["wasm_jit<br/>(browser JIT,<br/>primary target)"]
+    BX86["ballistic-x86<br/>(optional desktop JIT,<br/>unmodified upstream)"]
 
     NOOP -->|"Phase 2"| INT
-    INT -->|"Phase 5, desktop"| BX86
-    INT -->|"Phase 5, web"| BWASM
+    INT -->|"Phase 5"| PRE
+    PRE -->|"Phase 5, web"| WJIT
+    PRE -.->|"when upstream coverage suffices"| BX86
 
-    style BWASM fill:#e8f4ff,stroke:#0066cc
+    style WJIT fill:#e8f4ff,stroke:#0066cc
 ```
 
-Backend selection inside Ballistic is compile-time (`-DBALLISTIC_BACKEND=wasm|x86`), per its D-cache rules — no function-pointer dispatch in the translation loop.
+### Desktop: the WASM path is the web build, not an embedded engine
 
-### Contract items Voland requires from Ballistic
+Desktop users who want `wasm_jit` run the web build in a desktop browser: `wasm_jit` emits WASM and the browser's engine compiles it to native code. That is the supported "ARM → WASM → native" path on desktop, and it costs nothing beyond the web build itself.
 
-These are integration requirements this design imposes on the Ballistic WASM backend. With the WASM backend paused upstream, they are filed now as **design input** (Pound Discord) — constraints from a downstream consumer, stated while the IR is still malleable and changes are cheap. They become a hard gate only when upstream resumes WASM work; Voland builds nothing against them before then. Several diverge from Ballistic's current draft doc:
+**A native build (voland-cli, the Qt app) does not embed V8, JSC, or any other WASM engine to run `wasm_jit` output.** Region modules import the core's shared memory and the core's `funcref` table (contract items 5 and 7). In a native build the core is native code, so neither exists. Bridging them would need function imports (banned by item 5), plus a per-engine shim that exposes the native linear-memory mapping as a WASM memory. V8 is also a large C++ build dependency, and JSC exposes WASM only through a JS context. Embedding an engine to run the *whole* core module instead is just the web build in a different shell, with more packaging.
 
-1. **Bounded execution / yield points.** Emitted code decrements a cycle counter per block and exits when it reaches zero (`OPCODE_YIELD` semantics). Required by §7.
+Native builds therefore run the predecoded interpreter, plus ballistic-x86 once its coverage suffices. A Voland-owned native emitter is not planned. Revisit in Phase 8 only if profiling shows a desktop-browser gap that matters, under the same gate as native fastmem (§5).
+
+**Testing consequence:** `wasm_jit` interpreter-vs-JIT differential runs execute the core module under Node (V8, shared memory64) or the existing headless-Chrome harness, not under voland-cli.
+
+### wasm_jit requirements
+
+These were filed against Ballistic as design input in v3.27. They are now Voland's own requirements on `wasm_jit`, unchanged in substance:
+
+1. **Bounded execution / yield points.** Emitted code decrements a cycle counter per block and exits when it reaches zero. Required by §7.
 2. **MMU-aware loads/stores.** Emitted guest memory accesses perform the §5 page-table walk (inline or via a same-module helper). `iN.load offset=0` against raw guest addresses is not a valid emission.
-3. **Host-provided layout constants.** Register-file base, page-table L1 base, and guest-RAM base are configuration passed at compiler init — not constants Ballistic picks. Collision avoidance is the host's job via §4 layout.
-4. **Exit-code ABI, no traps for control flow.** Block functions return the next guest PC (i64), with exit reason in a fixed linear-memory mailbox slot. `OPCODE_TRAP` writes its reason to the mailbox and *returns*; it does not emit `unreachable` (a WASM trap unwinds through the JS boundary as a RuntimeError — orders of magnitude more expensive than a return, for no benefit).
-5. **No function imports; two non-function imports.** Region modules import (a) the shared memory and (b) the core module's growable `funcref` table. Register file and mailbox live in linear memory; SVC/fault/budget exits go through the return path. The table import is what makes the C dispatcher's `call_indirect` reach region block functions without a JS bounce per inter-region jump (§11). This changes Ballistic's module envelope: table import section, typed `() → i64` entries. (Resolves the v2 contradiction where §4 instantiated modules with `env.read_reg/write_reg/call_hle` imports while §7b claimed no imports — function imports stay banned.)
+3. **Host-provided layout constants.** Register-file base, page-table L1 base, and guest-RAM base come from `layout_get()` at translator init, never constants baked into the translator. Collision avoidance is the layout's job (§4).
+4. **Exit-code ABI, no traps for control flow.** Block functions return the next guest PC (i64), with the exit reason in a fixed linear-memory mailbox slot. Exits write their reason to the mailbox and *return*; they do not emit `unreachable`. A WASM trap unwinds through the JS boundary as a RuntimeError, which is orders of magnitude more expensive than a return, for no benefit.
+5. **No function imports; two non-function imports.** Region modules import (a) the shared memory and (b) the core module's growable `funcref` table. The register file and mailbox live in linear memory, and SVC/fault/budget exits go through the return path. The table import is what makes the C dispatcher's `call_indirect` reach region block functions without a JS bounce per inter-region jump (§11): table import section, typed `() → i64` entries.
 6. **Region-granularity modules**, not per-block modules. See §11.
 7. **Shared, memory64 memory type.** Emitted modules import a shared memory with the memory64 flag and matching limits, or instantiation throws.
+
+### Ideas inherited from Ballistic
+
+Ideas only. Hard rule 2 applies to Ballistic exactly as to any emulator: read for behavior, reimplement, never copy. Inherited:
+
+- **Differential fuzzing against Unicorn.** Random ARM64 instructions run through Voland's backend and Unicorn from the same pre-state, and the post-states are compared. This is a native-only test harness, never shipped (Unicorn is GPLv2). It covers the Phase 2 interpreter first and `wasm_jit` later, and it generates vectors in the same encoding / pre-state / post-state form as the hand-written instruction tests.
+- **A decoder generated from ARM's machine-readable A64 XML specification.** Voland writes its own generator over ARM's data, not Ballistic's tables. It lands with the Phase 2 interpreter, and `wasm_jit` shares it.
+- **Cheap tier 1 with a sliding-window peephole** during emission. A Voland tier 2 is gated on profiling: the browser already tiers compiled WASM.
+- **Structured SSA, if an IR is ever needed.** Ballistic's IR design uses structured control flow (if/loop scopes, symmetric yields). WASM's control flow is also structured (`block`/`loop`/`if`), which fits far better than a flat basic-block IR. It stays in reserve and is not built speculatively.
+- **Cache-footprint discipline for C hot paths:** hoist loads past aliasing hazards in loops, 64-byte-align shared singletons, order struct fields largest-first, and pad explicitly. This applies to the vmm walk, the scheduler, the dispatcher, and the register file.
+- **Behavior facts**, e.g. treat `PACIASP`/`AUTIASP` as no-ops and strip X30's upper bits.
+
+Not inherited: direct host loads against host-mapped regions (contradicts §5); mapping ARM flags onto host CPU flags (WASM has no flags register, so NZCV is lazy); recovering guest state through exception handling (contradicts item 4); clang-only and Lua tooling (Voland builds with GCC, Clang/emcc, and MSVC, §25).
+
+**Clean-room procedure:** `wasm_jit`'s interface header and translation spec go through the normal header review before any implementation. Implementation works from that spec, not with Ballistic's source open alongside it.
+
+### Ballistic-x86 (optional desktop backend)
+
+- Consumed as the unmodified `recompiler/` submodule, against Ballistic's public `bal_*` API only: no vendored headers, no patches, no fork. Integration code lives in `core/cpu/backends/ballistic/`, off-limits until the maintainer unlocks it (CLAUDE.md rule 10).
+- **Open question, resolved at integration:** how Voland answers Ballistic's region-description callback. Candidates are "never describe a region" (every access goes through the translate callback, which is correct but slow) or "describe page-granular runs that vmm guarantees stable until the next `vmm_unmap`/reprotect, with JIT-cache invalidation on change". The second needs an invalidation hook upstream does not expose yet.
+- Nothing in the project depends on ballistic-x86 landing. If it never reaches coverage, desktop runs the predecoded interpreter, and the web build is the fast path on desktop too.
 
 ### Executable memory abstraction per platform
 
@@ -974,7 +1019,7 @@ void wasm_commit_executable(void* ctx, void* mem, size_t size) {
 
 ### NEON ↔ WASM SIMD
 
-ARM NEON v8–v31 (128-bit) maps to WASM v128 (`vadd.i32→i32x4.add`, `vld1.32→v128.load`, etc). `-msimd128` is a required build flag (§24); without it vertex-heavy code drops ~4x. Out of Ballistic Tier 1 scope; noted for the build system and the eventual FP/SIMD tier.
+ARM NEON v8–v31 (128-bit) maps to WASM v128 (`vadd.i32→i32x4.add`, `vld1.32→v128.load`, etc). `-msimd128` is a required build flag (§24); without it, vertex-heavy code drops ~4x. Out of `wasm_jit` tier-1 scope; noted for the build system and the eventual FP/SIMD tier.
 
 ---
 
@@ -1020,7 +1065,7 @@ The interpreter is the mandatory fallback while compiles are in flight (`WebAsse
 flowchart TD
     MISS["dispatcher: block cache miss at GVA"]
     INTERP["interpret (immediate progress)"]
-    REGION["region discovery + Ballistic emit<br/>→ WASM module bytes"]
+    REGION["region discovery + wasm_jit emit<br/>→ WASM module bytes"]
     POST["post bytes to Compiler Worker<br/>(dedicated: SharedWorkers are a<br/>separate agent cluster and cannot<br/>structured-clone Modules back)"]
     MEMC["in-memory module cache<br/>key: code_hash + ir_build_id + backend semver"]
     OPFSC["OPFS byte cache (PTC)<br/>same key; stores BYTES, not modules"]
@@ -1045,7 +1090,7 @@ flowchart TD
 
 ### Cache keying
 
-**Key = `hash(region code bytes) + ir_build_id + backend_version`, namespaced by titleId.** Not guest address: ASLR and title updates make GVAs unstable and collision-prone. The GVA lives in the in-memory block-cache *entry*, never in the persistent key. `ir_build_id` covers Ballistic's IR compaction pass, which can change SSA assignments for identical input bytes.
+**Key = `hash(region code bytes) + ir_build_id + backend_version`, namespaced by titleId.** Not guest address: ASLR and title updates make GVAs unstable and collision-prone. The GVA lives in the in-memory block-cache *entry*, never in the persistent key. `ir_build_id` covers any translator change that alters emitted bytes for identical input (peephole rules, register-local allocation, a future IR pass); `wasm_jit` bumps it whenever its golden emission tests change.
 
 ### Persistence reality
 
@@ -1470,7 +1515,7 @@ Validity metadata lives in IndexedDB; blobs live in OPFS.
 ```typescript
 interface TranslationCacheMetadata {
   readonly titleId:         string;
-  readonly backendVersion:  string;  // Ballistic semver
+  readonly backendVersion:  string;  // wasm_jit semver
   readonly irBuildId:       string;  // invalidates on IR compaction-affecting changes
   readonly entryCount:      number;
   readonly lastUsedAt:      number;  // LRU eviction
@@ -1790,7 +1835,7 @@ One consolidation has defensible arithmetic and is the named Phase 8 revisit opt
 
 ### voland-cli: the first desktop artifact
 
-The desktop core ships first as a CLI with **zero Qt dependency** — because the test infrastructure requires it, not as a convenience: Phase 3/4 golden-image tests and interpreter-vs-JIT differential runs need a headless runner (offscreen render-to-texture via Dawn, hash, exit code). Subcommands: `run` (headless or windowed), `verify-dump` (hash-check decrypted input without booting), `ptc-precompile`, `cache` (inspect/evict), `save-export`/`save-import`. CI links voland-cli, never a GUI toolkit. The Phase 8 Qt app is a frontend over the same core — by then battle-tested by every CI run since Phase 3 — and the CLI doubles as the integration point for launcher frontends (EmulationStation-class).
+The desktop core ships first as a CLI with **zero Qt dependency** — because the test infrastructure requires it, not as a convenience: Phase 3/4 golden-image tests and native differential runs (interpreter vs. Unicorn, and vs. ballistic-x86 if integrated; `wasm_jit` differentials run under Node/headless Chrome, §10) need a headless runner (offscreen render-to-texture via Dawn, hash, exit code). Subcommands: `run` (headless or windowed), `verify-dump` (hash-check decrypted input without booting), `ptc-precompile`, `cache` (inspect/evict), `save-export`/`save-import`. CI links voland-cli, never a GUI toolkit. The Phase 8 Qt app is a frontend over the same core — by then battle-tested by every CI run since Phase 3 — and the CLI doubles as the integration point for launcher frontends (EmulationStation-class).
 
 **Xbox is demoted from the committed matrix to exploratory.** Three reasons, each sufficient: Dev-Mode sideloaded apps are memory-capped on older hardware well below Voland's ~5GB working set (must be re-verified against current caps per console generation before any commitment); the WinUI 2 / UWP stack is deprecated; and it competes for effort with platforms that reach more users. Two more make it categorical: JIT is Dev-Mode-only (retail UWP bans dynamic code generation, so distribution is a null set), and even the browser path fails — Edge on Xbox lives under the same memory regime, so the boot-time ~5.25GB allocation is refused at step one. **The exit condition is platform convergence, not porting effort:** if Microsoft's Windows/Xbox convergence direction ships consoles that run Windows applications, the Windows build works there unmodified and this row resurrects for free. Until then, no Xbox-specific code is written.
 
@@ -2159,7 +2204,7 @@ Debug Emscripten builds link the core as `MAIN_MODULE=1` with each HLE service a
 ### CMake options
 
 ```cmake
-option(CPU_BACKEND   "noop|interpreter|ballistic"          "noop")
+option(CPU_BACKEND   "noop|interpreter|wasm_jit|ballistic" "noop")
 option(GPU_BACKEND   "webgpu|vulkan|metal|d3d12|auto"      "auto")
 option(AUDIO_BACKEND "wasapi|coreaudio|pipewire|none|auto" "auto")  # web: none (§14)
 ```
@@ -2209,8 +2254,8 @@ Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), memor
 
 ```cmake
 # Web:      cmake -DCMAKE_TOOLCHAIN_FILE=$EMSDK/.../Emscripten.cmake \
-#                 -DCPU_BACKEND=ballistic -DGPU_BACKEND=webgpu ..
-# Desktop:  cmake -DCPU_BACKEND=ballistic -DGPU_BACKEND=auto ..
+#                 -DCPU_BACKEND=wasm_jit -DGPU_BACKEND=webgpu ..
+# Desktop:  cmake -DCPU_BACKEND=interpreter -DGPU_BACKEND=auto ..   # or =ballistic once unlocked (§10)
 # Apple:    cmake -G Xcode -DCMAKE_SYSTEM_NAME=iOS ..
 # Android:  cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 ..
 ```
@@ -2253,7 +2298,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 2 — First Instructions
 
-- [ ] Interpreter backend (partial ARM64), all memory access via vmm
+- [ ] Interpreter backend (partial ARM64), all memory access via vmm; decoder generated from ARM's A64 XML spec and Unicorn differential fuzzing (§10)
 - [ ] NRO loader — homebrew is this phase's proof of life
 - [ ] **Guest thread scheduler** (§7): bounded run, exit reasons, wait objects, virtual time
 - [ ] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler
@@ -2277,9 +2322,10 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 5 — Playable Core (+ Compatibility Database)
 
-- [ ] Ballistic-x86 integration on desktop: region compilation, dispatcher, exit-code ABI (§10–11). This validates all dispatcher/block-cache/PTC infrastructure backend-agnostically; the WASM emitter slots in whenever upstream resumes it
-- [ ] **Predecoded interpreter** for web: decode blocks once into a dense internal form (op index + extracted operands), execute the predecoded form. 2–4x over fetch-decode-execute, backend-independent, and its block discovery/invalidation is the same machinery the JIT dispatcher uses. This is the web execution path until Ballistic-WASM exists — treat it as a deliverable, not a stopgap
-- [ ] PTC first cut (desktop, against ballistic-x86): content-hash keys, OPFS bytes, session compile
+- [ ] **Predecoded interpreter** (all platforms): decode blocks once into a dense internal form (op index + extracted operands), execute the predecoded form. 2–4x over fetch-decode-execute, backend-independent, and its block discovery/invalidation is the same machinery the JIT dispatcher uses. This is the execution path until a JIT reaches coverage — treat it as a deliverable, not a stopgap
+- [ ] **`wasm_jit` tier 1** (§10): direct ARM64→WASM region translation meeting requirements 1–7, dispatcher, exit-code ABI (§10–11); interpreter-vs-JIT differentials under Node/headless Chrome
+- [ ] PTC first cut (web, against `wasm_jit`): content-hash keys, OPFS bytes, session compile
+- [ ] Ballistic-x86 integration on desktop (optional; once unlocked and upstream coverage suffices, §10)
 - [ ] Pipeline cache (OPFS, microcode-hash keys)
 - [ ] Software TLB if profiling justifies it (§5)
 - [ ] **Compatibility database — first cut.** As soon as any game runs, users need a public works/doesn't/hangs-at-X list.
@@ -2321,7 +2367,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 **If you know C:** the highest-leverage early subsystems are `vmm` (§5) and the scheduler (§7) — they gate everything — followed by HLE services from the §12 priority list, using Ryubing's C# implementations as behavioral references.
 
-**If you know compiler engineering:** the Ballistic WASM backend. Join the Pound Discord ([discord.gg/aMmTmKsVC7](https://discord.gg/aMmTmKsVC7)); the §10 contract items are the current integration questions.
+**If you know compiler engineering:** `wasm_jit`, Voland's ARM64→WASM translator (§10). Its requirements are §10's seven items; the work opens in Phase 5, and its interface header goes through header review first.
 
 ### Code review requirements
 
@@ -2346,9 +2392,9 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Ballistic
 
-- Repo: [github.com/pound-emu/ballistic](https://github.com/pound-emu/ballistic) · Discord: [discord.gg/aMmTmKsVC7](https://discord.gg/aMmTmKsVC7)
-- Status: working barebones x86 backend; WASM backend in design
-- Voland's integration contract: §10
+- Repo: [github.com/pound-emu/ballistic](https://github.com/pound-emu/ballistic) (GPLv2; GitHub issues are the contact channel)
+- Status (Oct 2026): tier-1 x86 compiler, direct ARM64→x86 translation without the IR; tier-2/IR code removed upstream; no WASM backend
+- Role in Voland: optional desktop x86 backend, consumed unmodified; source of ideas (not code) for `wasm_jit` — §10
 
 ### Nintendo Switch hardware
 
@@ -2378,9 +2424,8 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 | **memory64 bounds-check overhead** | Medium | High (it exists; magnitude varies) | ~5–15% on memory-heavy code, engine-dependent — measurable per engine now that memory64 is cross-browser. Mitigation: hot host structs in the low 4GB (§4); named escape hatch is multi-memory, gated on toolchain support (§4). Separately: the ~16GB per-memory browser cap is a hard Switch 2 constraint (§4). |
 | ~5.25GB shared-memory allocation fails on constrained devices | Medium | Medium | Detect at boot, fail with a specific message directing to native builds (§16). No graceful degradation is possible — the address space is the requirement. |
 | Softmmu overhead makes web performance unplayable for heavy titles | Medium | Medium | Two-load walk is the floor; software TLB and contiguous-heap fast paths are the measured escalations (§5). If insufficient, lighter titles remain viable on web and heavy titles are a native-build recommendation. |
-| Ballistic-WASM stays paused indefinitely (IR instability; currently paused at maintainer's request) | Medium–high for web perf | **Realized** — it is paused now | Web runs the predecoded interpreter (§25 Phase 5) with no JIT timeline. Mitigations: file §10 items as design input while the IR is malleable; validate all dispatcher/PTC infrastructure on ballistic-x86 desktop so the WASM emitter drops into finished plumbing. NOT a mitigation: forking, vendoring IR headers, or a homegrown emitter against the unstable IR — permanent divergence against a moving upstream. |
-| Ballistic-x86 doesn't reach coverage in time | Medium | Medium | Interpreter keeps everything functional on desktop too; the project ships without it. Performance, not existence, is what's at stake. |
-| Ballistic upstream rejects §10 contract items when WASM work resumes | Medium | Low–medium | Filed early as design input (see row above) precisely so this surfaces before anything is built against them. |
+| `wasm_jit` is a large, Voland-owned compiler effort | Medium–high for web perf | Medium | Tier 1 is direct translation with no IR (§10); the browser's WASM tiers do register allocation and generic optimization. The predecoded interpreter (§25 Phase 5) is a deliverable, so the web build is functional without the JIT. Unicorn differential fuzzing and the shared generated decoder are in place from the Phase 2 interpreter, before the JIT starts. Contributor recruitment for it starts with Phase 5. |
+| Ballistic-x86 doesn't reach coverage, or its memory interface can't be reconciled with §5 | Low | Medium | Optional backend: desktop runs the predecoded interpreter, and the web build is the fast path on desktop too. Performance, not existence, is what's at stake. |
 | Per-session `WebAssembly.compile` of PTC bytes is too slow at launch for large titles | Low–medium | Low | Baseline compile is tens of MB/s; if launch stalls appear, compile lazily per region on first execution instead of bulk-at-boot. AOT (Phase 7) shifts the balance further. |
 | WebGPU rendering differences across the three implementations (Dawn / wgpu / WebKit) | Medium | Medium | WebGPU is Baseline (Jan 2026) and worker-context support is verified on all three engines (§13); remaining gaps are Firefox Linux/Android rollout and per-implementation rendering differences. Boot-time capability check; golden-image tests run per engine in CI. |
 | COEP `require-corp` breaks third-party assets | Medium | Medium | First-party assets only; documented for self-hosters; SW re-injects headers on cached responses (§16). |
@@ -2395,9 +2440,18 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.27.0*
-*Last updated: September 2026*
+*Document version: 3.28.0*
+*Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.27 → v3.28 (summary)
+
+- **§10 rewritten: "Ballistic Integration Plan" → "JIT Backends".** The web JIT is now Voland's own ARM64→WASM translator, `wasm_jit` (Phase 5). Ballistic is demoted to an optional desktop x86 backend, consumed unmodified. Reason, from Ballistic's repository as of October 2026: its working tier-1 x86 compiler translates ARM64 directly without the IR, the tier-2/IR code was removed upstream on 2026-06-19, there is no WASM work, and the Discord design-input channel no longer reaches its maintainer. v3.27 waited on an IR stabilizing that gates nothing that exists.
+- **Forking rejected, stated in §10.** A fork is legally possible (both projects are GPLv2), but the IR-based compiler was never working code, and a fork carries permanent divergence against an active upstream.
+- **The seven v3.27 contract items become `wasm_jit`'s own requirements**, unchanged in substance. Item 3's "constants Ballistic picks" is now "constants baked into the translator".
+- **Desktop WASM path stated:** the web build in a desktop browser. Native builds do not embed a WASM engine: region modules need the core's memory and `funcref` table, which a native core does not have.
+- **Ideas inherited from Ballistic, listed in §10 under hard rule 2** (ideas only, never code): Unicorn differential fuzzing, a decoder generated from ARM's A64 XML spec, tier-1 sliding-window peephole, structured SSA held in reserve, and cache-footprint rules for C hot paths. Rejected ideas are listed alongside, with reasons.
+- **Ripple edits:** §1 overview and recompiler dependency, §2 tree (`backends/wasm_jit/`), §7 yield wording, §8 backend diagram, §11 flow and `ir_build_id` meaning, §15 `backendVersion` comment, §17 differential-run wording, §24 option list and build targets, §25 Phase 2 interpreter line and Phase 5 tasks (`wasm_jit` tier 1 and the PTC first cut move to the web; ballistic-x86 is optional), §26 contributor pointer, §27 Ballistic entry, §28 risk rows. No code or header changes; `cpu.h`'s `CPU_BACKEND_WASM_JIT` declaration arrives with the Phase 5 header review.
 
 ### Changelog v3.26 → v3.27 (summary)
 
