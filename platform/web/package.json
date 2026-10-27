@@ -25,6 +25,6 @@
     "@webgpu/types": "^0.1.72",
     "typescript": "^7.0.2",
     "vite": "^8.3.0",
-    "vite-plugin-solid": "^2.10.0"
+    "vite-plugin-solid": "^2.11.14"
   }
 }
