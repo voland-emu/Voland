@@ -6,7 +6,7 @@ Design specification for Voland's web JIT. It is the companion to [DESIGN.md](DE
 >
 > **Precedence:** DESIGN.md is authoritative. A disagreement between the two documents is a bug in one of them, and the fix updates both in the same PR.
 >
-> **Verified so far:** the module mechanism this design rests on, probed on V8 (Node 26.5, 2026-10-27). A region module imports the core's shared memory64 and funcref table and is instantiated synchronously. The core calls it with `call_indirect`. It calls back into a core helper with `call_indirect`, and chains to another instance with `return_call_indirect`. Its `loop` + `br_table` body runs a million back edges at constant stack depth. A call to an empty table slot traps (J8.3). JSC and SpiderMonkey are covered by the J12 engine matrix.
+> **Verified so far:** the module mechanism this design rests on, probed on V8 (Node 26.5, 2026-10-27). A region module imports the core's shared memory (memory64 at the time; the core is wasm32 since DESIGN.md v3.29, and the re-check rides with its §25 wasm32 task) and funcref table and is instantiated synchronously. The core calls it with `call_indirect`. It calls back into a core helper with `call_indirect`, and chains to another instance with `return_call_indirect`. Its `loop` + `br_table` body runs a million back edges at constant stack depth. A call to an empty table slot traps (J8.3). JSC and SpiderMonkey are covered by the J12 engine matrix.
 
 **Contents:** J1 Scope · J2 Architecture · J3 The IR · J4 Regions · J5 Execution ABI · J6 Module shape · J7 Translation rules · J8 Dispatcher and code cache · J9 Web plumbing · J10 Translation cache · J11 Engine features · J12 Determinism and testing · J13 Performance and tiers · J14 Security · J15 Proposed interfaces · J16 Landing plan · J17 Open questions · J18 Decision log
 
@@ -229,15 +229,15 @@ typedef struct A64_State {
 } A64_State;
 ```
 
-`get_register_file` (DESIGN.md §8) returns `&state->regs`. States come from an arena in the core's low heap, where DESIGN.md §4 keeps hot host structures for memory64's sake.
+`get_register_file` (DESIGN.md §8) returns `&state->regs`. States come from an arena in the core's heap, inside DESIGN.md §4's host budget.
 
 ### J5.2 Region function type
 
 ```wat
-(func $region (param $ctx i64) (result i64))  ;; C: uint64_t (*)(A64_State *)
+(func $region (param $ctx i32) (result i64))  ;; C: uint64_t (*)(A64_State *)
 ```
 
-The parameter is the thread context and the result is the next guest PC. This refines the `() → i64` that requirement 5 named in v3.27 (DESIGN.md §10 now states the new type). Passing the context avoids loading a "current thread" global on every call, lets one translation serve every thread of the process (DESIGN.md §7), and leaves nothing to change for the per-core-worker experiment (J13).
+The parameter is the thread context, a pointer and so an `i32` in the wasm32 core (DESIGN.md §4; `i64` through DESIGN.md v3.28), and the result is the next guest PC. This refines the `() → i64` that requirement 5 named in v3.27 (DESIGN.md §10 now states the new type). Passing the context avoids loading a "current thread" global on every call, lets one translation serve every thread of the process (DESIGN.md §7), and leaves nothing to change for the per-core-worker experiment (J13).
 
 The C dispatcher calls a region through an ordinary function pointer whose value is its table slot. On Emscripten, a C function pointer *is* an index into `__indirect_function_table`, so the call compiles to one `call_indirect` with no JS involved. Emscripten's own `addFunction` relies on the same mechanism.
 
@@ -290,8 +290,8 @@ A module carries a batch of 1 to `WASM_JIT_MAX_BATCH` region functions:
 
 | Section | Contents |
 |---|---|
-| Type | a canonical list in a fixed order: the region type `(i64) → i64` first, then the walk-helper type and the core helper types (J7.9). The fixed order keeps type indices identical across batches, so cached bodies need no type relocation. |
-| Import | `env.memory`: `memory i64 shared`, minimum = maximum = the boot memory's page count (DESIGN.md §4, §10 req. 7). `env.table`: `table funcref`, minimum 0, no maximum, index type matching the core's table (J17 question 3). Nothing else (C4). |
+| Type | a canonical list in a fixed order: the region type `(i32) → i64` first, then the walk-helper type and the core helper types (J7.9). The fixed order keeps type indices identical across batches, so cached bodies need no type relocation. |
+| Import | `env.memory`: `memory shared`, wasm32, minimum = maximum = the boot memory's 65535 pages (DESIGN.md §4, §10 req. 7). `env.table`: `table funcref`, minimum 0, no maximum, 32-bit-indexed like the core's table (J17 question 3). Nothing else (C4). |
 | Function | one per region, plus the module-local walk helper (J7.3) |
 | Export | each region function, named by batch position (`r0`, `r1`, …) |
 | Code | the bodies (J6.2) |
@@ -416,6 +416,8 @@ else
 ```
 
 `tlb_vpn` starts as all ones, which no 64-bit address's page number can equal, so an unfilled entry never hits. (A single unsigned compare of `addr − tlb_page` is shorter but unsound: whatever value marks "empty", some 4096 guest addresses would hit it.) The TLB locals need no invalidation: page tables change only in SVC handlers and the dispatcher, never while a region runs (green threading, DESIGN.md §7). This mirrors the interpreter's one-entry TLB per direction (DESIGN.md §5). A TLB that survives across region calls is §5's measured software TLB, in tier 2.
+
+**Address width.** The guest address and the TLB delta are `i64`; only the final host address is narrowed, with one `i32.wrap_i64` before the `i32`-addressed load or store, because the core is wasm32 (DESIGN.md §4, v3.29). That narrowing lives in one emitter helper, so a future memory64 build (Switch 2) changes one function.
 
 **Slow path.**
 
@@ -651,13 +653,13 @@ DESIGN.md §11 and §15 already fix the storage (OPFS for bytes, IndexedDB for m
 
 ## J11. Engine features
 
-`wasm_jit` targets baseline WebAssembly 3.0, which includes the memory64 and tail-call support every browser Voland runs on already ships (DESIGN.md §4, §16), plus the shared-memory atomics proposal. Beyond that, as of October 2026:
+`wasm_jit` targets wasm32 with the shared-memory atomics (threads) proposal, SIMD128 and bulk memory, which every browser Voland runs on ships, Safari included (DESIGN.md §4, §16). It does not use memory64 (DESIGN.md v3.29). Beyond that, as of October 2026:
 
 | Feature | Use | Detection | In cache key |
 |---|---|---|---|
 | Branch hinting (`metadata.code.branch_hint`) | slow paths, faults, budget and other exits marked unlikely | none: engines without support ignore the section | no |
 | Wide arithmetic (`i64.mul_wide_s/u`, `i64.add128`, `i64.sub128`) | SMULH/UMULH; carry and overflow flags | `WebAssembly.validate` on a probe module at boot, with a baseline fallback | yes |
-| Tail calls (`return_call_indirect`) | tier-2 inter-region linking (J13); not used in tier 1 | none needed: part of WASM 3.0, shipped with memory64 everywhere | — |
+| Tail calls (`return_call_indirect`) | tier-2 inter-region linking (J13); not used in tier 1 | part of WASM 3.0; confirm Safari support (DESIGN.md §16 browser table) before tier 2 relies on it | — |
 | Relaxed SIMD | not used for anything ARM defines exactly: `relaxed_madd` may or may not fuse, depending on the host | — | — |
 | JSPI | not needed: nothing in Voland blocks inside WASM (DESIGN.md §7) | — | — |
 | JIT interface proposal (WebAssembly/jit-interface) | watch item; until it ships, late linking (memory and table imports) is the standard technique | — | — |
@@ -675,7 +677,7 @@ C8 makes the interpreter and `wasm_jit` observationally identical: the same regi
 | Assembler | golden bytes per emitter | native ctest |
 | Module builder | assembled modules pass `WebAssembly.validate`; relocation patching round-trips | native build emits, Node validates (no Wasmtime or wasm-tools dependency) |
 | Region former, analyses | region shapes (loops, diamonds, multiple entries, caps), flag liveness, register sets: asserted on structure, no WASM involved | native ctest |
-| Translator | **data-driven instruction vectors** (encoding, pre-state, post-state; CLAUDE.md), each run through both the interpreter and `wasm_jit` | the core's web build under Node (shared memory64) |
+| Translator | **data-driven instruction vectors** (encoding, pre-state, post-state; CLAUDE.md), each run through both the interpreter and `wasm_jit` | the core's web build under Node (shared wasm32 memory) |
 | Exits | budget expiry at exact counts; fault precision (a fault at instruction k leaves the state after k−1); exclusive windows and the grace cap; IC IVAU + ISB self-invalidation; mapping-change invalidation | Node |
 | Differential fuzzing | random instruction sequences from the decoder's encoding space, and whole regions: interpreter vs `wasm_jit`, compared at every exit | Node, nightly |
 | Engine matrix | the vector suite on V8, JSC and SpiderMonkey (Playwright WebKit and Firefox), proving the NaN fixups and FP emulation exact everywhere | CI, periodic |
@@ -691,7 +693,7 @@ The interpreter-vs-JIT differential cannot see decoder bugs, because both sides 
 
 **Where tier 1's time goes, by design:**
 
-- **Inside a region**, guest registers and flags end up in host registers once the engine's optimizing tier runs. A memory access that hits the TLB costs a handful of host instructions plus memory64's bounds check (DESIGN.md §4).
+- **Inside a region**, guest registers and flags end up in host registers once the engine's optimizing tier runs. A memory access that hits the TLB costs a handful of host instructions with no engine bounds check, since wasm32 memories use guard regions (DESIGN.md §4).
 - **Region transitions** cost a write-back of the written registers, a return, a hash probe, a `call_indirect`, and reloading the touched registers. This is tier 1's main overhead on branchy, call-heavy code.
 - **Cold code** runs in the engine's baseline tier until the engine promotes it. Regions are hot by construction (J4.7), so promotion comes quickly.
 
@@ -769,7 +771,7 @@ Decisions this document does not make, each with a recommendation where there is
 
 1. **Crypto Extension instructions vs. the `aes` tripwire.** *Decided 2026-10-28, as recommended (J18).* The A57 implements AESE/AESD/AESMC/AESIMC, SHA1\*/SHA256\* and PMULL, and games use them through the SDK for their own purposes. Implementing them is CPU semantics, not decryption of Nintendo content: they are operations of the guest program, like an XOR, and nothing in Voland's loader path uses them. The review tripwire (`grep -rin "aes\|decrypt"`) flags them, and hard rule 1 was the maintainer's to interpret. Only the four AES forms match; SHA, PMULL and CRC32 do not. They hit wherever their names appear: the generated decoder and metadata tables in `core/cpu/a64/`, and the semantics file. Tier 1 as specified adds no hits: J7.9 gives these forms no helper, so they run on the interpreter (`jit_tier` 0, J4.6), and a later helper would add its own. *Decision:* implement them as plain architectural semantics, shared by both backends, in one clearly named file. DESIGN.md §1.6 records why this is not decryption, and CONTRIBUTING.md lists hits under `core/cpu/` that name or implement the four AES forms as a standing tripwire exception, next to `arena.c`'s `malloc`. Titles that use them would fault otherwise. The first implementation is the Phase 2 interpreter's.
 2. **License of ARM's machine-readable specification**, which generates the decoder (J3). Check the terms of the exact release used before committing generated tables.
-3. **Emscripten's table under wasm64.** Verify on Emscripten 6.0.9+ whether `-m64` exports a 32- or 64-bit-indexed table, and the spelling of the table-growth flag. The answer sets the table import's index type, `call_indirect`'s operand type, and the index type JS passes to `table.set`.
+3. **Emscripten's table under wasm64.** *Resolved by DESIGN.md v3.29:* the core is wasm32, so `__indirect_function_table` is 32-bit-indexed, `call_indirect` takes an `i32`, and JS passes a Number to `table.set`. Only the table-growth flag's spelling remains to verify on Emscripten 6.0.9+ (DESIGN.md §24).
 4. **Defaults** for `WASM_JIT_HOT_THRESHOLD`, batch size, in-flight limit and slot capacity, to be set by Phase 5 measurement.
 5. **Relaxed-SIMD FMA** (J11): gather the evidence, or keep exact emulation permanently?
 6. **YIELD/WFE exits** map to `CPU_EXIT_CYCLES_ELAPSED`. A distinct `CPU_EXIT_YIELD` would let the scheduler skip virtual time forward when every thread is waiting. That is a `cpu.h` change, best decided with the Phase 2 scheduler.
@@ -787,7 +789,7 @@ Decisions this document does not make, each with a recommendation where there is
 | Predecoded records as the IR (J3) | SSA micro-op IR; decoding straight to WASM with no shared form | The browser optimizes generic code; ARM-aware optimizations need only per-instruction facts; one decoder serves the interpreter and the JIT |
 | One function per region: `loop` + `br_table`, forward edges as `br` | one function per block linked by calls; per-block functions linked by tail calls | Calls grow the stack on every guest loop iteration; tail calls force a register spill per block (DESIGN.md §11) |
 | Multi-entry regions | a new region per entry address | Every BL return site would compile its own overlapping region |
-| `(i64 ctx) → i64` | `() → i64` with a "current thread" global | No load per call; one translation serves all threads; ready for per-core workers |
+| `(i32 ctx) → i64` (`i64 ctx` through DESIGN.md v3.28) | `() → i64` with a "current thread" global | No load per call; one translation serves all threads; ready for per-core workers |
 | Position-independent bodies, relocated host constants | absolute GVAs in code; a core build id in the cache key | Content-hash keys are wrong without position independence (J5.5) |
 | Lazy flags, materialized by per-kind stubs | eager NZCV everywhere; materialization at each exit | CMP + B.cond becomes one compare; exit code stays small |
 | Shared epilogue that writes back all written registers | per-exit write-back sets (tier 2) | Small code and a simple invariant |
@@ -798,3 +800,4 @@ Decisions this document does not make, each with a recommendation where there is
 | Compile only hot code | compile on first miss (v3.27) | Boot code runs once; the predecoded interpreter is fast enough to warm up |
 | Batches of bodies per module | one module per region | per-module compile and instantiate overhead |
 | Crypto Extension as plain guest semantics, with a standing tripwire exception for the four AES forms (J17 question 1, decided 2026-10-28) | leaving them undefined; justifying every hit per PR; renaming them past the grep | They are the guest's own operations on its own data, as on hardware (DESIGN.md §1.6). Leaving them undefined breaks titles and stops nothing, since guest code can compute AES in software. Renaming would hide the hits instead of explaining them |
+| wasm32 core: `i32` context and host addresses, `i64` guest addresses (DESIGN.md v3.29) | memory64 (through v3.28) | Guest RAM is the application pool and fits in 4 GiB; Safari has no memory64; guard-region bounds checks are free (DESIGN.md §4) |
