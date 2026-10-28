@@ -34,7 +34,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 24. [Build System](#24-build-system)
 25. [Development Phases](#25-development-phases)
 26. [Contributing](#26-contributing)
-27. [Reference Implementations](#27-reference-implementations)
+27. [Reference Material](#27-reference-material)
 28. [Risk Register](#28-risk-register)
 
 ---
@@ -88,7 +88,7 @@ To keep the project focused, several things are explicitly NOT goals. Contributo
 
 - **Faster than Ryujinx on desktop.** Mature native emulators are ahead on raw performance and compatibility on desktop and will stay ahead. Voland's contribution is *deployment surface* (browser + every native platform), not speed. The desktop builds exist to support development and reach users on platforms where browser deployment isn't appropriate, not to compete on benchmark numbers.
 
-- **Day-one Switch 2 support.** Switch 2 is a future target, not a current one. Voland's architecture extends to Switch 2 (the softmmu and memory64 address space are already in place), but the project is not racing to be first.
+- **Day-one Switch 2 support.** Switch 2 is a future target, not a current one. Voland's architecture extends to Switch 2 (the softmmu's 39-bit guest address space is already in place, and memory64 is the named route to Switch 2's larger RAM, §4), but the project is not racing to be first.
 
 - **Hosting games or distributing Nintendo IP.** Voland never includes, distributes, or operates infrastructure that touches Nintendo's copyrighted material. Users provide their own keys, their own decrypted game files, from hardware they own. See §1.6 for the legal scope this implies.
 
@@ -186,12 +186,16 @@ voland/
   docs/
     DESIGN.md                # this file
     DUMP.md                  # separate-tools guide (keys + decryption happen there, never in Voland)
-    SAVE_FORMAT.md
-    TRACE_FORMAT.md
     WASM_JIT.md              # wasm_jit specification: ARM64→WASM translator (§10–11)
-    GPU_COMMAND_STREAM.md    # versioned CPU→GPU worker command format
+    # planned, written when their subsystem lands:
+    GPU_COMMAND_STREAM.md    # versioned CPU→GPU worker command format (Phase 4, §13)
+    SAVE_FORMAT.md           # save data and save states (§15)
+    TRACE_FORMAT.md          # trace buffer events (§23)
+    CONSENT_FLOWS.md         # normative consent-flow state machines (§17)
+    COMPANION_API.md         # emulator↔companion server protocol (§20)
 
   core/                      # C11, platform-agnostic
+    emulator.{h,c}           # emulator_create/destroy: wires layout, vmm, backend, HLE
     cpu/
       cpu.h                  # abstract CPU backend interface (§8)
       cpu.c                  # backend wiring
@@ -218,7 +222,8 @@ voland/
                              # TLS, main-thread entry ABI
         tls.{h,c}            # per-process TLS page allocator: 0x200-byte blocks
                              # (IPC command buffer first), pages mapped via vmm
-        memory.{h,c}         # heap/MapMemory SVCs (thin layer over vmm)
+        svc_memory.{h,c}     # SetHeapSize/MapMemory/UnmapMemory/QueryMemory
+                             # SVCs: thin layer over vmm (§12)
         scheduler.{h,c}      # guest thread scheduler (§7)
         thread.{h,c}         # guest thread objects: CPU_State + TLS block,
                              # tpidrro_el0 armed once at creation
@@ -271,6 +276,7 @@ voland/
       ring_buffer.{h,c}      # SPSC ring buffer (audio ring, GPU command ring)
       log.{h,c}              # structured logging to trace buffer
       assert.h
+      result.h               # Result/Error types (§3)
       vmm.{h,c}              # guest virtual memory manager / softmmu (§5)
       layout.{h,c}           # linear memory layout: region reservation + exports (§4)
 
@@ -310,7 +316,8 @@ voland/
                              # save-sync backend, TURN pairing. User-hosted only;
                              # Voland operates no instance. User-owned data only.
 
-  recompiler/                # Ballistic git submodule (unmodified; optional desktop backend, §10)
+  recompiler/                # Ballistic git submodule (unmodified; optional desktop
+                             # backend, §10); added when the backend is unlocked
 
   tests/
     cpu/ hle/ gpu/ games/
@@ -392,6 +399,10 @@ typedef enum Result {
   RESULT_INVALID_ARGUMENT = 2,
   RESULT_NOT_FOUND        = 3,
   RESULT_IO_ERROR         = 4,
+  RESULT_NOT_IMPLEMENTED  = 5,
+  RESULT_MEMORY_FAULT     = 6, // guest VA unmapped or permission denied (§5)
+  RESULT_NOT_CONTIGUOUS   = 7, // vmm_guest_to_host across non-adjacent pages (§5)
+  RESULT_ENCRYPTED_INPUT  = 8, // loader input is not pre-decrypted (§1.6, §12)
 } Result;
 
 typedef struct {
@@ -414,35 +425,57 @@ type Result<T>  = Success<T> | Failure;
 
 ## 4. Memory Architecture
 
-**There is exactly one memory: the core module's shared, memory64 `WebAssembly.Memory`.** Guest RAM, the register files, the page tables, the framebuffer slots, the audio ring, the GPU command ring, the input region, and the trace buffer are all regions inside it. On native platforms the equivalent is a single large anonymous mapping owned by `core/common/layout.c`.
+**There is exactly one memory: the core module's shared wasm32 `WebAssembly.Memory` of 65535 pages, 4 GiB minus one 64 KiB page** (v3.29; memory64 through v3.28). Guest RAM, the register files, the page tables, the framebuffer slots, the audio ring, the GPU rings, the input and output regions, the control region and the trace buffer are all regions inside it. On native platforms `core/common/layout.c` carves the same regions, with guest RAM as its own OS reservation (below).
 
 This is forced, not chosen. Emscripten-compiled C can only dereference addresses inside its own linear memory. A separate `SharedArrayBuffer` handed in from JS is unreachable from the core — there is no operation that turns an external ArrayBuffer into a `void*`. The v2 design allocated guest RAM as a standalone 4GB SAB; that design could never have run.
 
 ### Consequences
 
-- **memory64 is mandatory for Switch 1**, not a Switch 2 nicety. Guest RAM (4GB physical, ~3.2GB application-usable) plus Emscripten's own data/stack/heap plus JIT emission buffers, shader IR, and arenas exceeds 4GB of linear memory.
-- **memory64 is cross-browser** (shipped as part of WebAssembly 3.0; available in all engines since early 2025), so this is not a portability bet — but it has a real cost: engines lose some 32-bit bounds-check elision, overhead engine-dependent, roughly 5–15% on memory-heavy code. Mitigation: hot host-side structures (register files, JIT state, page tables) live in the low 4GB of the address space where engines retain fast paths. Named escape hatch if measured overhead ever exceeds tolerance: **multi-memory** — keep the core wasm32 (guard-page bounds checks), put guest RAM in a second 4GB wasm32 memory addressed only by JIT-emitted code. It fails today because Clang/Emscripten give C no way to touch a second memory, which would gut the softmmu's one-implementation property; revisit only if toolchain support materializes. Cheap to write down, expensive to rediscover. Listed in the risk register (§28).
-- **Browsers cap memory64 at roughly 16GB per memory.** Irrelevant for Switch 1's 5.25GB; a hard constraint for Switch 2 plans (12–16GB guest RAM + host overhead does not fit under a 16GB cap — the sparse-commit VMM has to earn its keep there, not just declare a big address space).
-- **Memory size is fixed at boot: `initial === maximum`, growth disabled.** Views over a growable shared memory detach on grow; every worker holds long-lived typed-array views. Fixing the size removes an entire class of view-invalidation bugs. The Switch's memory needs are known at boot; nothing legitimate requires growth.
+- **The guest gets the application pool, not the whole console** (v3.29). Horizon splits the console's 4 GB: the application pool, 3285 MiB in the retail 4 GB arrangement, and the applet and system pools, about 811 MiB, for the OS, its services and the applets. Voland's HLE *is* that OS. So guest physical RAM is the application pool plus a small **HLE carve-out** for guest pages that system services own on hardware and map into the title: `pl:u`'s shared fonts (about 17 MiB) and the `hid:`, `time:` and applet shared memory. The title's own memory (heap, code, stacks, TLS, transfer and code memory) draws from the application pool, and HLE-owned shared memory from the carve-out; `page_allocator` gains that split with the first HLE-owned shared memory (`hid:`, Phase 4). `GetInfo`'s total-memory queries report the application pool, on every platform (§3).
+- **wasm32, not memory64** (v3.29). Guest RAM and the host budget below fit in 4 GiB, so the core is a wasm32 module:
+  - On 64-bit hosts, engines implement wasm32 bounds checks with guard regions, so they cost nothing. The softmmu makes three linear-memory accesses per guest access (two table loads and the data, §5), so this compounds.
+  - Safari, which had not shipped memory64 as of October 2026, can run Voland, as can every engine with threads and SIMD (§16 browser table).
+  - The boot allocation is 4 GiB instead of 5.25 GiB (§28).
+  - The renderer uses emdawnwebgpu in its mainstream configuration (§13), and pointers cross the JS boundary as Numbers.
+
+  v3.28 called memory64 "mandatory for Switch 1". That rested on sizing guest RAM at the console's full 4 GB, which no retail title can use.
+- **The 4 GiB ceiling is hard, so host memory is budgeted:**
+
+  | Consumer | Budget | Notes |
+  |---|---|---|
+  | Guest RAM: application pool | 3285 MiB | fixed by Horizon's 4 GB arrangement |
+  | Guest RAM: HLE carve-out | 48 MiB | `pl:u` fonts plus service shared memory; revisited as services land |
+  | Fixed layout regions | ≈22 MiB | `layout.h`: framebuffer slots, rings, input/output/control regions, trace buffer |
+  | vmm L2 tables | 32 MiB | §5 |
+  | Everything else | ≈709 MiB | Emscripten static data and stacks; the malloc heap (HLE state, loader staging); predecoded records and the JIT emission buffer (§11); the renderer's heap (§13 gate 3) |
+
+  Every consumer in the last row gets a cap, and a defined behavior at the cap, when its subsystem lands. Caches evict: predecoded records and regions go through the invalidation path (§11). Everything else fails with an `Error`. Running out is never a surprise out-of-memory later. Compiled region code, textures, pipelines and shader modules live in the engine and the GPU process, outside linear memory, so they don't count.
+- **memory64 is the Switch 2 path, not a second build.** Switch 2's 12 GB doesn't fit in wasm32. When Switch 2 work starts (a non-goal today, §1.5), memory64 returns with its costs: explicit bounds checks (roughly 5–15% on memory-heavy code, engine-dependent), a browser cap of about 16 GB per memory (12 GB of guest RAM plus host overhead barely fits, so the sparse-commit VMM has to earn its keep), and whatever Safari has shipped by then. Until then there is one web build. Under application-pool sizing, memory64 gives a Switch 1 guest nothing, and a second build would double the core, renderer, JIT, PTC and e2e matrices. `wasm_jit` keeps the address width inside one emitter helper (WASM_JIT.md J7.3), so the change stays local. **Multi-memory** remains the named alternative: guest RAM in a second memory addressed only by JIT-emitted code. It is blocked because Clang and Emscripten give C no way to touch a second memory, which would gut the softmmu's one-implementation property. Cheap to write down, expensive to rediscover.
+- **Memory size is fixed at boot: `initial === maximum`, growth disabled.** Growing a shared memory doesn't detach existing views; it leaves them short, still ending at the old size. Every worker would have to notice and rebuild its views, and Emscripten pays for the same problem with growable-heap wrappers on every JS heap access. Fixing the size removes that class of bug. The Switch's memory needs are known at boot; nothing legitimate requires growth.
+- **Nothing ends at 2^32.** The memory is 65535 pages, not 65536: a region ending exactly at 2^32 has an end pointer that wraps to 0 in a 32-bit `size_t`.
+- **Native builds use the same pool sizes** (§3) and reserve guest RAM without committing it: `MEM_RESERVE` on Windows, committing pages as `page_allocator` hands them out, and `MAP_NORESERVE` on Linux and Android. Committing the whole region at boot charges all of it against the Windows commit limit before a page is touched. Today's `layout.c` does exactly that (`MEM_RESERVE | MEM_COMMIT`); it is fixed with the §25 wasm32 task.
 
 ### Layout
 
 ```
-WebAssembly.Memory (shared, address: i64, initial == maximum ≈ 5.25 GB)
+WebAssembly.Memory (shared, wasm32, initial == maximum == 65535 pages ≈ 4 GiB)
 
-  0x0000_0000  Emscripten static data, stack, malloc heap
-               (hot host structs below 4GB — see memory64 note)
-               ├─ per-guest-thread register files
+  0x0000_0000  Emscripten static data, stacks, malloc heap: the host budget (≈709 MiB)
+               ├─ per-guest-thread register files (A64_State)
                ├─ page tables (L1 + on-demand L2s, §5)
-               ├─ JIT emission buffers
-               ├─ framebuffer slots ×2 + publish counter (§6)
+               ├─ predecoded records + JIT emission buffer (§11)
+               ├─ framebuffer slots ×2 + publish/consume counters (§6)
                ├─ audio ring (§14)
-               ├─ GPU command ring (§13)
-               ├─ input region (§18)
+               ├─ GPU command ring + completion ring (§13)
+               ├─ input region + output region (§18)
+               ├─ control region: the CPU worker's wake word (§6)
                └─ trace buffer (§23)
-  GUEST_RAM_BASE                       ┐
-               guest physical RAM, 4GB │ arena-carved at boot,
-  GUEST_RAM_BASE + 4GB                 ┘ page-aligned
+  GUEST_RAM_BASE                                  ┐
+               guest physical RAM:                │ arena-carved at boot,
+               application pool (3285 MiB)        │ page-aligned
+               then the HLE carve-out (48 MiB)    │
+  GUEST_RAM_BASE + GUEST_RAM_SIZE                 ┘
+  0xFFFF_0000  end of memory (the 65536th page is never part of it)
 ```
 
 ### Ownership and exports
@@ -453,19 +486,23 @@ WebAssembly.Memory (shared, address: i64, initial == maximum ≈ 5.25 GB)
 // core/common/layout.h
 typedef struct {
   uint64_t guest_ram_base;        // linear-memory offset of guest physical RAM
-  uint64_t guest_ram_size;        // 4GB (Switch 1)
+  uint64_t guest_ram_size;        // application pool + HLE carve-out (§4)
   uint64_t page_table_l1_base;    // §5
   uint64_t framebuffer_slot_base; // §6: 2 slots + publish counter
   uint64_t audio_ring_base;       // §14
   uint64_t gpu_ring_base;         // §13
   uint64_t gpu_completion_ring_base; // §13: GPU→CPU syncpoint completions
   uint64_t input_region_base;     // §18
+  uint64_t output_region_base;    // §18: rumble + player LEDs, CPU→main (v3.29, proposed)
+  uint64_t control_region_base;   // §6: CPU worker wake word (v3.29, proposed)
   uint64_t trace_buffer_base;     // §23
   uint64_t breakpoint_region_base;// §23
 } Memory_Layout;
 
 const Memory_Layout* layout_get(void);
 ```
+
+The two v3.29 fields are proposals: `layout.h` gains them through header review, with the tasks that first use them (§25).
 
 JS-side consumers never allocate shared buffers; they receive the `WebAssembly.Memory` object plus `layout_get()` offsets and construct views:
 
@@ -480,7 +517,7 @@ Views are constructed once at worker init and are valid forever (no growth).
 
 ### What "guest RAM" means here
 
-`GUEST_RAM_BASE + n` is guest *physical* address `n`. Guest code never sees physical addresses — every guest access is a *virtual* address translated by the softmmu (§5). JIT-emitted code therefore never emits `load(guest_address + GUEST_RAM_BASE)` directly; it emits the translation sequence, whose output is a linear-memory offset with the base already folded into the page-table entry.
+`GUEST_RAM_BASE + n` is guest *physical* address `n`: the application pool first, then the HLE carve-out. Guest code never sees physical addresses — every guest access is a *virtual* address translated by the softmmu (§5). JIT-emitted code therefore never emits `load(guest_address + GUEST_RAM_BASE)` directly; it emits the translation sequence, whose output is a linear-memory offset with the base already folded into the page-table entry.
 
 ### Small shared buffers
 
@@ -513,6 +550,8 @@ PTE layout (page-aligned host offsets leave the low 12 bits free):
   PTE == 0     unmapped
 ```
 
+**Proposed for header review (v3.29), not adopted: 32-bit PTEs holding guest-physical frames.** With guest RAM under 4 GiB on every platform (§4), a PTE could hold the guest-physical frame and the permission bits in 32 bits, with the walk adding `guest_ram_base` afterwards. On wasm32 that add is free, riding in the load's offset immediate as a session constant relocated like the others (§10 requirement 3); on native it is one add. Page tables would halve (64 KB L2 tables, a 16 MB L2 arena), and the guest-physical recovery MapMemory and SetHeapSize do today (`vmm_guest_to_host` minus `guest_ram_base`, v3.27 changelog) would go away. It changes `vmm.h` and the JIT's walk, so header review decides it; until then the layout above stands.
+
 ### Translation fast path
 
 ```
@@ -524,7 +563,9 @@ pte      = load64(l2_base + l2_index * 8)              ; perm bit clear → faul
 host     = (pte & ~0xFFF) | (gva & 0xFFF)
 ```
 
-Two dependent loads plus masking. The JIT emits this sequence (or a call to a per-module local helper function — never a JS import) for every guest load/store; the fault path exits the block with `CPU_EXIT_FAULT` and the faulting GVA, handled by the dispatcher in C. Tier 1 does the full two-load walk every access. A software TLB (small direct-mapped cache of recent translations, checked before the walk) is a measured Phase 5+ optimization, not a Tier 1 requirement.
+Two dependent loads plus masking. The JIT emits this sequence (or a call to a per-module local helper function — never a JS import) for every guest load/store; the fault path exits the block with `CPU_EXIT_FAULT` and the faulting GVA, handled by the dispatcher in C. Tier 1 keeps a one-entry TLB per direction in WASM locals and walks only on a miss (§10 requirement 2, WASM_JIT.md J7.3), as the interpreter does (below). A software TLB that survives across calls (a small direct-mapped cache of recent translations, checked before the walk) is a measured Phase 5+ optimization, not a Tier 1 requirement.
+
+An access that crosses a page boundary translates both pages before it moves a byte, so it is all-or-nothing (`vmm.h`); the JIT calls a core helper for it (WASM_JIT.md J7.3). Under wasm32 (§4) the two table loads and the data access carry no engine bounds checks.
 
 A second later optimization: because Voland controls physical layout, the main heap can usually be mapped contiguously, letting the JIT skip translation for accesses statically provable to land in it. Noted here so nobody designs it in early — it is an optimization on top of a correct softmmu, not a substitute for one.
 
@@ -650,6 +691,8 @@ flowchart TB
     Main -.->|"linear memory:<br/>input region"| CPU
     CPU -.->|"linear memory:<br/>framebuffer slots,<br/>GPU command ring"| GPU
     CPU -.->|"linear memory:<br/>audio ring"| AWP
+    GPU -.->|"linear memory:<br/>completion ring,<br/>wake word"| CPU
+    CPU -.->|"linear memory:<br/>output region"| Main
 ```
 
 Dashed lines are shared linear memory + Atomics. Solid lines are postMessage, reserved for lifecycle events (init, pause, shutdown, resize, device connect/disconnect) — never per-frame data. There is **no Audio Worker**; the worklet processor reads the ring itself (§14).
@@ -664,6 +707,8 @@ Dashed lines are shared linear memory + Atomics. Solid lines are postMessage, re
 | GPU completion ring | GPU Worker | CPU Worker (syncpoint signal) | SPSC ring indices |
 | Audio ring | CPU Worker (DSP) | AudioWorkletProcessor | SPSC ring indices, no waiting |
 | Input region | Main thread | CPU Worker | seqlock |
+| Output region (rumble, player LEDs) | CPU Worker (`hid:`) | Main thread | seqlock |
+| Control region (wake word) | GPU Worker; the CPU Worker's own message handlers | CPU Worker driver | `Atomics.add` + `notify`; `waitAsync` |
 | Trace buffer | all workers | UI thread, Chrome extension | atomic write index |
 | Breakpoint region | debugger | CPU Worker | atomic flag bits |
 
@@ -681,12 +726,39 @@ FRAMEBUFFER_SLOT_BASE:
 ```
 
 - CPU finishes frame N → writes into slot `N % 2` → atomic-increments publish counter → `Atomics.notify` → **immediately begins frame N+1**.
-- CPU blocks only on backpressure: before writing slot `(N+1) % 2`, if `publish - consume >= 2` it waits (blocking `Atomics.wait` **with a 100ms timeout** so pause/shutdown messages are never starved indefinitely).
-- GPU waits for `publish > consume` using **`Atomics.waitAsync`** — a worker parked in blocking `Atomics.wait` cannot service `postMessage` (resize, shutdown, WebGPU device-lost). Presents the newest published slot, increments consume, notifies.
+- **Backpressure never blocks the worker** (v3.29). Before writing slot `(N+1) % 2`, if `publish - consume >= 2`, the frame waits in the guest's own buffer queue (§13): the queued buffer is copied once a slot frees, and a game that runs out of free buffers blocks in `DequeueBuffer`, as it would on hardware. That is a WAITING guest thread (§7), not a waiting worker. v3.28 parked the worker in a blocking `Atomics.wait` with a 100ms timeout "so pause/shutdown messages are never starved"; it delivered none, because a timeout ends the wait, not the task (see the driver below).
+- GPU waits for `publish > consume` using **`Atomics.waitAsync`**: a worker parked in blocking `Atomics.wait` cannot service `postMessage` (resize, shutdown, WebGPU device-lost). It presents the newest published slot, then **stores the publish value it read into consume** and notifies the CPU Worker's wake word. A store, not an increment (v3.29): after a skipped frame, an increment leaves consume behind the frame just shown, and the next wake presents it again.
+- The rule is safe because, for the publish value P the GPU read, it reads slot `(P-1) % 2`. The CPU writes that slot again only for frame P+1, which needs `publish - consume < 2`, so consume ≥ P, which the GPU stores only after it has finished reading.
 
 If the GPU falls behind, the newest-slot rule means it presents the latest frame and skips stale ones, which is the correct behavior for an emulator (latency beats completeness).
 
 This blit-style handoff is the Phase 3 rendering path. From Phase 4 the GPU command ring (§13) carries real rendering; the framebuffer slots remain for the final present of software-composited surfaces.
+
+### CPU worker driver: slices, yields, idle (v3.29)
+
+The core never blocks and never calls into JS (§11), yet the CPU Worker has to hear the outside world: lifecycle messages, compiled batches from the Compiler Worker (§11), OPFS completions. A worker receives messages only when JS returns to its event loop, and a blocking `Atomics.wait` doesn't return there: its timeout ends the wait, not the task. So `cpu.worker.ts` drives the core in slices:
+
+```typescript
+// platform/web/workers/cpu.worker.ts (sketch)
+async function drive(core: Core, control: Int32Array): Promise<void> {
+  for (;;) {
+    const slice = core.runSlice(SLICE_MS);  // scheduler rounds (§7) until the slice ends or nothing can run
+    if (slice.kind === "idle") {
+      // Waiting without blocking: the event loop stays live, so messages still arrive.
+      await Atomics.waitAsync(control, WAKE_WORD_INDEX, slice.observedWake, slice.timeoutMs).value;
+    } else {
+      await yieldToEventLoop();             // one MessageChannel round trip
+    }
+    // Lifecycle messages and compiled-batch installation (§11) run here, between slices.
+  }
+}
+```
+
+- **Running:** `runSlice` returns after about 4ms of scheduler rounds, and the driver yields through a `MessageChannel` message to itself. Not `setTimeout`: nested timers are clamped to at least 4ms. A lifecycle message is therefore handled within one slice.
+- **Idle:** when no virtual core can run before its next deadline, or the pacer holds virtual time back (§7), `runSlice` reports idle with a timeout, and the driver awaits `Atomics.waitAsync` on the control region's **wake word**. Whatever can make a guest thread runnable increments the word and notifies it: the GPU Worker after pushing a completion or consuming a frame (§13, the frame handoff above), and the CPU Worker's own message handlers, so a pause or resume takes effect at once.
+- **No blocking waits in this worker.** A worker parked in `Atomics.wait` can't take a pause, a compiled module or a shutdown. The GPU Worker follows the same rule.
+- §11's single-writer invariant rests on this boundary: compiled batches are installed by the driver between slices, never during one.
+- Native builds call the same slice entry point from a host thread and wait on a condition variable where the web build awaits `waitAsync`.
 
 ---
 
@@ -706,6 +778,17 @@ Rationale:
 - Per-core workers are an **architecture fork, priced here so the Phase 8 gate is honest.** Invariants that currently hold by single-thread construction and are demolished: JIT emits real `atomic.rmw`/`cmpxchg` for guest exclusives; every kernel object, the handle table, and scheduler queues need locking; §3's arenas are single-threaded; virtual time becomes a contended counter; the GPU command ring's SPSC breaks (multi-producer nvdrv decode); the §5 borrow guarantee is voided; the hid writer's sampling-number protocol goes from decorative to load-bearing; §11's block cache and funcref table are per-worker (wasm tables cannot cross threads → per-worker instantiation of shared modules); and — hardest — **vmm page tables vs concurrent inline JIT walks**: a walker races unmap into torn PTEs, and the two-load fast path cannot afford a lock, so mutation needs a quiesce protocol or RCU-style epochs.
   **The named intermediate, designed before the full fork is ever attempted:** execution workers + one kernel worker. Guest CPU execution parallelizes; SVCs marshal to the kernel worker; **HLE stays single-threaded** (the largest demolition item avoided). Page-table mutation quiesces at the yield points that already exist — budget checks at block entry are safe points: unmap requests all execution workers exit at the next block boundary, applies, resumes. Cost: real atomics, the quiesce protocol, SVC round-trip latency. Evidence gate unchanged: profiling must show single-worker guest-CPU throughput is the bottleneck.
 
+### Virtual cores (v3.29)
+
+Green threading removes parallelism, not cores. Horizon schedules each core on its own: a core runs the highest-priority runnable thread assigned to it, while the other cores run theirs at the same time, whatever their priorities. A single global run queue can't express that. A priority-44 thread that spins on a flag a priority-45 thread on another core will set works on hardware. Under one global queue the spinner wins every pick, and ending its slice on YIELD changes nothing, because the next pick is the spinner again: a livelock that exists only in the emulator. v3.28 had exactly that queue, with affinity as a tie-break.
+
+So the scheduler models the cores the title's npdm allows (cores 0–2 for retail applications), with one run queue per virtual core:
+
+- A thread has an **ideal core** and a 64-bit **affinity mask** (`SetThreadCoreMask`), not a single hint. It is queued on its ideal core, and a core with nothing runnable may take a thread whose mask allows it.
+- Each core applies Horizon's per-core rules: priority order, the yield variants of `SleepThread` (0, −1, −2), and Horizon's periodic rotation at its preemption priority. switchbrew is the reference for each, checked when the Phase 2 scheduler lands.
+- `GetCurrentProcessorNumber` reports the virtual core the thread is running on.
+- A thread spinning on another thread's write makes progress because the writer runs on its own core in the same round (below), not because preemption happens to favor it.
+
 ### Bounded execution
 
 The scheduler owns the loop. The backend runs one guest thread for a bounded budget and reports why it stopped:
@@ -722,37 +805,51 @@ typedef enum CPU_ExitReason {
 
 Every backend must be able to stop when the budget expires. **Preemption happens only at check events** (v3.28): when a taken backward direct branch (target at or below its own address) or an indirect branch (BR, BLR, RET) retires with the budget exhausted, the thread stops with its PC at the branch target. Every backend counts cycles as retired guest instructions, one each.
 
-Check events are properties of the guest program. Block and region boundaries are not: they depend on what has been compiled, and compiles finish on wall-clock time. So the interpreter and the JIT preempt at identical points whatever is compiled, which keeps runs reproducible and interpreter-vs-JIT differentials exact (§3). Every infinite path passes check events infinitely often, because a path of forward-only branches strictly increases the PC; so the budget's overshoot is bounded. For the JIT this is a per-block decrement of a local plus a test on backward edges and indirect exits (`wasm_jit` requirement 1, §10; WASM_JIT.md J7.6). YIELD, WFE and WFI also end the thread's slice: spin-wait loops use them, so this lets the awaited thread run sooner. `run(entry_point)`-until-done does not exist in the interface.
+Check events are properties of the guest program. Block and region boundaries are not: they depend on what has been compiled, and compiles finish on wall-clock time. So the interpreter and the JIT preempt at identical points whatever is compiled, which keeps runs reproducible and interpreter-vs-JIT differentials exact (§3). Every infinite path passes check events infinitely often, because a path of forward-only branches strictly increases the PC; so the budget's overshoot is bounded. For the JIT this is a per-block decrement of a local plus a test on backward edges and indirect exits (`wasm_jit` requirement 1, §10; WASM_JIT.md J7.6). YIELD, WFE and WFI also end the core's quantum early: spin-wait loops use them, and the round moves on to cores that can make progress. `run(entry_point)`-until-done does not exist in the interface.
 
 ### Scheduler
 
 ```c
-// core/hle/kernel/scheduler.h
+// core/hle/kernel/scheduler.h (sketch; the header goes through review in Phase 2)
 typedef struct Guest_Thread {
   CPU_State*  cpu_state;        // one register file per guest thread
-  uint64_t    tls_gva;          // 0x200-byte TLS block; tpidrro_el0 set on switch (§12)
+  uint64_t    tls_gva;          // 0x200-byte TLS block; tpidrro_el0 armed once at creation (§12)
   uint32_t    priority;         // 0 (highest) .. 63, Switch convention
-  uint32_t    preferred_core;   // affinity hint; no real parallelism
-  Thread_Run_State run_state;   // RUNNABLE, WAITING, SLEEPING, DEAD
-  uint64_t    wake_at_ns;       // for SleepThread / timeouts
+  int32_t     ideal_core;       // Horizon ideal core
+  uint64_t    affinity_mask;    // cores it may run on (SetThreadCoreMask)
+  uint32_t    current_core;     // virtual core it last ran on (GetCurrentProcessorNumber)
+  Thread_Run_State run_state;   // CREATED, RUNNABLE, WAITING, SLEEPING, DEAD
+  uint64_t    wake_at_vt;       // SleepThread / timeouts, in virtual time
   Wait_Object* waiting_on;      // kernel sync object, if WAITING
   // intrusive run-queue links, arena-allocated
 } Guest_Thread;
 
-void scheduler_tick(Scheduler* sched);  // the CPU worker's main loop body
+void            scheduler_tick(Scheduler* sched);    // one round over the virtual cores
+Scheduler_Slice scheduler_run_slice(Scheduler* sched, uint32_t slice_ms);
+                                                     // §6 driver entry: ticks until the slice
+                                                     // ends; reports idle + a timeout when
+                                                     // nothing can run
 ```
 
-`scheduler_tick`: pick the highest-priority runnable thread (round-robin within a priority band, honoring affinity as a tie-break), call `backend->run(thread->cpu_state, budget)`, then dispatch on the exit reason:
+`scheduler_tick` runs one **round**: each virtual core, in fixed index order, gets a quantum of `VT_QUANTUM_CYCLES`. The core runs its highest-priority runnable thread with `backend->run(thread->cpu_state, remaining)` and dispatches on the exit reason, continuing with its next runnable thread until the quantum is spent or nothing on it is runnable; it then idles for the rest of the round.
 
-- `CYCLES_ELAPSED` → re-enqueue; advance virtual time.
-- `SVC` → the SVC handler already ran inside `run()`. Blocking SVCs (`WaitSynchronization`, `SleepThread`, `ArbitrateLock`) marked the thread WAITING/SLEEPING and registered it on a wait object or timer; the scheduler simply doesn't re-enqueue it. Non-blocking SVCs → re-enqueue.
+- `CYCLES_ELAPSED` → the quantum is spent. The thread stays current on its core and resumes next round; Horizon would not have switched away from it.
+- `SVC` → the SVC handler already ran inside `run()`. A blocking SVC (`WaitSynchronization`, `SleepThread`, `ArbitrateLock`) left the thread WAITING or SLEEPING on a wait object or timer, so the core picks its next runnable thread. After a non-blocking SVC the thread continues.
 - `FAULT` → guest crash handling. Self-modifying code never arrives as a fault: invalidation is driven by mapping changes and `IC IVAU` (§5).
 
-Threads become RUNNABLE again when another thread signals the wait object or the virtual timer fires.
+Threads become RUNNABLE again when another thread signals the wait object, a virtual timer fires, or a host completion arrives (the GPU completion ring, §13). The fixed core order and quantum make the interleaving deterministic: the same inputs give the same run on every host and backend (§3, WASM_JIT.md C8).
 
 ### Virtual time
 
-A virtual cycle counter advances by the consumed budget on every `run()` return. It backs `CNTVCT_EL0` and the `time:` services. Games that spin waiting on another thread's writes make progress because budget expiry preempts the spinner and virtual time advances past their timeout checks. Wall-clock coupling (so games run at real-time speed) is applied at the frame-pacing level, not inside the scheduler.
+Virtual time is one 64-bit cycle count. It backs `CNTVCT_EL0`, the `time:` services, `SleepThread` and every timeout, and it schedules each periodic producer: vsync (§13), the hid writer (§12) and audio frame production (§14).
+
+- **Rounds, not sums** (v3.29). Each round advances virtual time by the quantum, because the cores run in parallel on hardware. Inside a round, a thread reading `CNTVCT_EL0` sees the round's start plus the cycles its own core has run so far, so the cores never disagree by more than one quantum. v3.28 added every thread's consumed budget to one counter, which made guest time run up to 3× fast whenever three threads were busy.
+- **Counter conversion.** Cycles are retired instructions, one each (Bounded execution, above). With `VT_CPU_HZ` = 1 020 000 000 and `VT_COUNTER_HZ` = 19 200 000 (`CNTFRQ_EL0`), counter ticks are `cycles × 8 / 425` and nanoseconds are `cycles × 50 / 51`. These are the reduced fractions, computed from the absolute cycle count, so the results are exact and monotonic and can't overflow in a session. This is "the scheduler's formula" that WASM_JIT.md J7.7 refers to; both backends call one shared C definition.
+- **Open, decided before Phase 2 closes:** the A57 retires more than one instruction per cycle on typical game code, so at one cycle per instruction a title that fits its frame budget on hardware can miss it in virtual time on any host. The knob is the cycles-per-instruction ratio (a faster virtual console), which vsync-locked titles tolerate. Measure it on the first titles that boot.
+- **Idle skipping.** When no virtual core has a runnable thread, virtual time jumps to the earliest pending deadline: a timer, a sleep, a timeout, the next vsync or audio period. With no deadline pending, the scheduler is waiting on the host (a GPU completion, a lifecycle event) and reports idle to the driver (§6). WASM_JIT.md J17 question 6 proposes a `CPU_EXIT_YIELD` that would let a core spinning in WFE count as idle here.
+- **Pacing.** Virtual time is authoritative; wall-clock time only throttles it. The scheduler never lets virtual time run more than one frame (1/60 s) ahead of wall-clock time since boot or the last resume. When it would, it reports idle until that wall time, and the driver waits (§6). When emulation is slower than real time, virtual time falls behind and the guest sees a slower console: whole frames, never skipped time, and no catch-up burst afterwards. Pausing stops both clocks.
+- **Deterministic mode.** Tests, voland-cli golden runs and interpreter-vs-JIT differentials turn the throttle off and keep idle skipping, so a run's result never depends on host speed (§3).
+- The audio worklet consumes in wall time while the DSP produces in virtual time. §14's rate controller absorbs the difference while emulation keeps up, and underruns are reported when it doesn't.
 
 ### CPU_State is per guest thread
 
@@ -827,9 +924,10 @@ typedef struct CPU_Backend {
   CPU_State* (*create)(VMM_Context* vmm, void* userdata);
   void (*destroy)(CPU_State* state);
 
-  // Execution. Runs the thread whose register file is `state` for at most
-  // `cycle_budget` cycles. Must be able to stop at translation-block
-  // boundaries when the budget expires. Never runs to completion.
+  // Execution. Runs the thread whose register file is `state` until
+  // `cycle_budget` is exhausted, stopping at the next check event (§7: a
+  // taken backward branch or an indirect branch). Never runs to completion.
+  // (v3.29 doc fix; cpu.h's own comment changes in the WASM_JIT.md J15 review.)
   CPU_ExitReason (*run)(CPU_State* state, uint64_t cycle_budget);
   CPU_ExitReason (*step)(CPU_State* state);
 
@@ -984,7 +1082,7 @@ Desktop users who want `wasm_jit` run the web build in a desktop browser: `wasm_
 
 Native builds therefore run the predecoded interpreter, plus ballistic-x86 once its coverage suffices. A Voland-owned native emitter is not planned. Revisit in Phase 8 only if profiling shows a desktop-browser gap that matters, under the same gate as native fastmem (§5).
 
-**Testing consequence:** `wasm_jit`'s interpreter-vs-JIT differential runs execute the core module under Node (V8, shared memory64) or the existing headless-Chrome harness, not under voland-cli. The translator itself is plain C and builds natively, so its emission tests run under ctest (WASM_JIT.md J12).
+**Testing consequence:** `wasm_jit`'s interpreter-vs-JIT differential runs execute the core module under Node (V8, shared wasm32 memory) or the existing headless-Chrome harness, not under voland-cli. The translator itself is plain C and builds natively, so its emission tests run under ctest (WASM_JIT.md J12).
 
 ### wasm_jit requirements
 
@@ -994,9 +1092,9 @@ These were filed against Ballistic as design input in v3.27. They are now Voland
 2. **MMU-aware loads and stores.** Every emitted guest memory access performs the §5 page-table walk, behind a per-region one-entry TLB held in locals, with the walk itself in a module-local helper. `iN.load offset=0` against raw guest addresses is not a valid emission.
 3. **Host-provided constants.** The page-table L1 base comes from `layout_get()`, and context field offsets and helper table indices from the core build. None are constants the translator picks. The session-specific ones are relocated when a module is assembled, so cached bodies carry none (WASM_JIT.md J5.5).
 4. **Exit-code ABI, no traps for control flow.** Region functions return the next guest PC (i64), with the exit reason in the thread context's control block, the "mailbox". Exits write their reason and *return*. They never emit `unreachable`: a WASM trap unwinds through the JS boundary as a RuntimeError, which is orders of magnitude more expensive than a return, for no benefit.
-5. **No function imports; two non-function imports.** Region modules import (a) the shared memory and (b) the core module's `funcref` table. Region functions have the type `(i64 ctx) → i64`: the parameter is the guest thread's `A64_State` (register file, V registers, control block), so one translation serves every thread of the process. The table import lets the C dispatcher's `call_indirect` reach regions, and lets regions reach core C helpers the same way, all without JS (§11).
+5. **No function imports; two non-function imports.** Region modules import (a) the shared memory and (b) the core module's `funcref` table. Region functions have the type `(i32 ctx) → i64`: the parameter points at the guest thread's `A64_State` (register file, V registers, control block), so one translation serves every thread of the process. The table import lets the C dispatcher's `call_indirect` reach regions, and lets regions reach core C helpers the same way, all without JS (§11).
 6. **Region-granularity modules**, batched: each module carries several region functions, one per region. See §11.
-7. **Shared, memory64 memory type.** Emitted modules import a shared memory with the memory64 flag and matching limits, or instantiation throws.
+7. **Shared wasm32 memory type** (v3.29; memory64 through v3.28). Emitted modules import the core's shared memory with matching limits, 65535 pages (§4), or instantiation throws. Guest addresses stay `i64` in locals; only the host address the walk produces is `i32` (WASM_JIT.md J7.3).
 8. **Position-independent code** (new in v3.28). Emitted code computes every guest address from a page base the dispatcher supplies and embeds no absolute GVA. Without this, §11's GVA-free content-hash cache key would serve wrong branch targets once ASLR moves code.
 
 ### Design summary
@@ -1021,7 +1119,7 @@ Voland's maintainer wrote a tier-1 WASM backend design for Ballistic (Round 4, J
 | Guest address = linear-memory offset; `iN.load offset=0` on the guest address | Requirement 2: every access walks the §5 page table | No GVA identity exists (§1, load-bearing decision 2) |
 | Fixed `BAL_REGFILE_BASE` above a 4GB guest window | Requirement 3: context offsets from the core build, layout from `layout_get()` | Collision avoidance is the layout's job (§4) |
 | One module per block | Requirement 6: batched region modules | One `WebAssembly.compile` per block, plus a JS bounce per inter-block jump |
-| Signature `() → ()`, next PC stored to a slot | Requirements 4 and 5: `(i64 ctx) → i64` returns the next PC | The draft's objection, that cap-terminated blocks fall off the end with an empty stack, goes away: every region exit goes through one epilogue that returns the PC |
+| Signature `() → ()`, next PC stored to a slot | Requirements 4 and 5: `(i32 ctx) → i64` returns the next PC | The draft's objection, that cap-terminated blocks fall off the end with an empty stack, goes away: every region exit goes through one epilogue that returns the PC |
 | `OPCODE_TRAP` → store reason, `unreachable` (draft Q-A: not resumable) | Requirement 4: write the mailbox, then `return` | Return-based exits make every fault resumable without a function import. The cost, writing back cached registers on a fault exit, is paid once, in a shared epilogue, and faults are precise (WASM_JIT.md J7.3). |
 | Memory-only import | Requirement 5: memory **and** the core's `funcref` table | `call_indirect` between dispatcher, regions and helpers without JS |
 | Compiler *Shared* Worker | Dedicated Compiler Worker (§11) | SharedWorkers are a separate agent cluster and cannot hand Modules back |
@@ -1029,7 +1127,7 @@ Voland's maintainer wrote a tier-1 WASM backend design for Ballistic (Round 4, J
 
 ### Engine features beyond baseline WASM
 
-Summary; details and status are in WASM_JIT.md J11. The baseline is WebAssembly 3.0 with memory64 and threads, which every browser Voland supports already ships.
+Summary; details and status are in WASM_JIT.md J11. The baseline is wasm32 with threads (shared memory and atomics), SIMD128 and bulk memory, which every browser Voland supports ships, Safari included (§16 browser table). memory64 is not part of it (§4).
 
 - **Branch hinting** is adopted in tier 1. Engines without support ignore the section, so it has no cache-key impact.
 - **Wide arithmetic** is feature-detected at boot for SMULH/UMULH and the carry and overflow flags, and its bit joins the §11 cache key.
@@ -1085,11 +1183,12 @@ One `WebAssembly.Module` per basic block does not scale: thousands of instantiat
 
 - **Start** at a hot entry GVA; the predecoded interpreter counts block entries. Follow direct branches, including both arms of conditionals. A BL's fall-through joins the region as an extra **entry**, since control returns to it through RET; the callee is not followed.
 - **Stop growing** at: an indirect branch, SVC, BRK or undefined encoding, YIELD/WFE/WFI, MSR FPCR, an instruction the translator does not cover yet (it is interpreted instead), a debugger breakpoint, or a size cap (~64KB of emitted WASM).
-- **Emit each region as one function**, `(i64 ctx) → i64`. The body is a `loop` enclosing a `br_table` over the region's guest blocks, with the selector in an `i32` local. Blocks are laid out so that a forward edge is a plain `br`; only entries and back edges go through the `br_table`. Indirect branches leave the region.
+- **Emit each region as one function**, `(i32 ctx) → i64`. The body is a `loop` enclosing a `br_table` over the region's guest blocks, with the selector in an `i32` local. Blocks are laid out so that a forward edge is a plain `br`; only entries and back edges go through the `br_table`. Indirect branches leave the region.
 - **Why one function, not one function per block:** if blocks were functions and intra-region jumps were calls, a guest loop (`A → B → A`) would grow the WASM call stack on every iteration until it overflowed, and an overflow is a trap (§10 requirement 4). Structured branches keep the stack depth constant. They also keep guest registers in WASM locals across the whole region, so the register file in linear memory is touched only at entry and exit.
 - **Region exits** all go through one shared epilogue. It writes back every guest register the region writes, materializes NZCV, stores the PC and the budget, records the exit reason in the context's control block, and returns the PC (§10 requirement 4). Faults are precise: guest state is exactly as it was before the faulting instruction (WASM_JIT.md J7.3).
 - **Entries and overlap:** the block cache maps each entry GVA to `(slot, block index, page base)`. Regions may overlap in guest code, and invalidation drops every region that covers an affected range.
 - **Batching:** a module carries up to 16 region functions. The unit of translation and caching is the function body; the unit of compilation is the batch.
+- **Memory budget** (v3.29): predecoded records, block-cache entries and the JIT emission buffer live in the core's host budget (§4), each with a cap. At a cap, the coldest blocks and regions are dropped through the invalidation path, and recompiled if they turn hot again.
 - **Considered and rejected: one function per block, linked with WASM tail calls (`return_call`).** It also keeps the stack constant, but every intra-region jump would cross a function boundary. Guest registers would then have to be spilled to linear memory and reloaded per block (or passed as parameters), which gives up the main reason to form regions. Tail calls *are* the tier-2 mechanism for linking whole regions to each other (WASM_JIT.md J13), where the exit state is already in memory.
 
 ### The dispatcher
@@ -1117,11 +1216,11 @@ How the C dispatcher reaches region code: **the core module's `funcref` table (`
 
 On Emscripten a C function pointer *is* a table index, so the dispatcher calls a region as an ordinary function pointer: one genuine in-wasm `call_indirect`, with zero JS on the dispatch hot path. Emscripten's own `addFunction` uses the same mechanism. Regions call core C helpers (page-crossing accesses, exact f64 FMA, estimate tables) the same way, through the imported table, still without function imports.
 
-Wasm tables cannot be shared across threads, but this table never needs to be: the core instance and every region instance live in the same CPU Worker under the current single-worker design. Per-core workers (§7) would force per-worker tables and per-worker instantiation; that cost is on §7's fork price list. Instantiation itself uses the synchronous `new WebAssembly.Instance(module)`, which is legal and fast in a worker for an already-compiled module; do not add an async hop on the instantiate side. This exact shape (shared memory64 and table imports, cross-instance `call_indirect` and `return_call_indirect`, synchronous instantiation) was verified on V8 in October 2026 (WASM_JIT.md, status note).
+Wasm tables cannot be shared across threads, but this table never needs to be: the core instance and every region instance live in the same CPU Worker under the current single-worker design. Per-core workers (§7) would force per-worker tables and per-worker instantiation; that cost is on §7's fork price list. Instantiation itself uses the synchronous `new WebAssembly.Instance(module)`, which is legal and fast in a worker for an already-compiled module; do not add an async hop on the instantiate side. This exact shape (shared memory and table imports, cross-instance `call_indirect` and `return_call_indirect`, synchronous instantiation) was verified on V8 in October 2026, with a memory64 memory (WASM_JIT.md, status note). The wasm32 re-check, on all three engines, rides with the §25 wasm32 task.
 
-**Block-cache single-writer invariant, stated because it is enforced by construction rather than by code:** every mutation (installation on compile-message receipt, `table.set`, cache registration, invalidation) executes on the CPU worker thread. None of it can interleave mid-`run()`, because synchronous WASM blocks the worker's event loop; messages queue until the scheduler tick returns. No locks exist because none are needed *on this design*. Any change that introduces a second mutator (per-core workers, moving instantiation elsewhere) inherits the §7 fork price.
+**Block-cache single-writer invariant, stated because it is enforced by construction rather than by code:** every mutation (installation on compile-message receipt, `table.set`, cache registration, invalidation) executes on the CPU worker thread. None of it can interleave mid-`run()`, because synchronous WASM blocks the worker's event loop; messages queue until the current slice returns to the driver (§6). No locks exist because none are needed *on this design*. Any change that introduces a second mutator (per-core workers, moving instantiation elsewhere) inherits the §7 fork price.
 
-The interpreter is the mandatory fallback while compiles are in flight (`WebAssembly.compile` is async); for hot code the gap closes after one compilation. **The hand-off is pull-based:** the core never calls into JS to request a compile. `cpu.worker.ts` pulls finished batches between scheduler ticks (WASM_JIT.md J8.4), which keeps `core/` platform-agnostic.
+The interpreter is the mandatory fallback while compiles are in flight (`WebAssembly.compile` is async); for hot code the gap closes after one compilation. **The hand-off is pull-based:** the core never calls into JS to request a compile. `cpu.worker.ts` pulls finished batches between slices (§6; WASM_JIT.md J8.4), which keeps `core/` platform-agnostic.
 
 ### End-to-end flow (web)
 
@@ -1133,7 +1232,7 @@ flowchart TD
     PTCQ{"translation cache (PTC):<br/>body for this key?"}
     TRANS["wasm_jit translates<br/>→ position-independent body"]
     BATCH["module builder: batch bodies,<br/>patch relocations → bytes in the<br/>JIT emission buffer"]
-    PULL["cpu.worker.ts pulls the batch between ticks,<br/>copies the bytes, posts them to the Compiler Worker<br/>(dedicated: SharedWorkers are a separate<br/>agent cluster and cannot structured-clone<br/>Modules back)"]
+    PULL["cpu.worker.ts pulls the batch between slices,<br/>copies the bytes, posts them to the Compiler Worker<br/>(dedicated: SharedWorkers are a separate<br/>agent cluster and cannot structured-clone<br/>Modules back)"]
     COMPILE["WebAssembly.compile(bytes)"]
     INST["new WebAssembly.Instance(module,<br/>{ env: { memory, table } })<br/>(imports: shared memory +<br/>core funcref table only)"]
     REG["table.set each region into its slot;<br/>the core registers entries in the block cache"]
@@ -1205,7 +1304,7 @@ Two structural rules introduced by §5 and §7:
 
 An IPC "call" a game makes to a service crosses three layers, and all three are Voland's to implement. This is the highest-volume code in the project; it needs a fixed shape, not per-service improvisation.
 
-**Thread-local storage is the transport.** Every guest thread owns a 0x200-byte TLS block; its first 0x100 bytes are the IPC command buffer. `tpidrro_el0` points at the block. Consequences: the kernel thread code allocates TLS blocks from a TLS page allocator (guest-visible pages, mapped via vmm); `Guest_Thread` carries `tls_gva`; the scheduler sets `tpidrro_el0` on every context switch through the backend's sys-reg interface, and JIT-emitted `mrs tpidrro_el0` reads it from the per-thread state. IPC cannot be stubbed without TLS existing — it is a Phase 1 dependency, not a detail.
+**Thread-local storage is the transport.** Every guest thread owns a 0x200-byte TLS block; its first 0x100 bytes are the IPC command buffer. `tpidrro_el0` points at the block. Consequences: the kernel thread code allocates TLS blocks from a TLS page allocator (guest-visible pages, mapped via vmm); `Guest_Thread` carries `tls_gva`; thread creation arms `tpidrro_el0` once, in the thread's own `CPU_State`, through the backend's sys-reg interface (v3.26). Each thread has its own register file, so a context switch changes nothing, and JIT-emitted `mrs tpidrro_el0` reads it from the per-thread state. IPC cannot be stubbed without TLS existing — it is a Phase 1 dependency, not a detail.
 
 **HIPC (kernel transport).** `SendSyncRequest` parses the command buffer from the caller's TLS via vmm: header words, handle descriptor (send-PID flag, copy handles, move handles), buffer descriptors (X = pointer, A = send, B = receive, C = receive-list), then the aligned data payload. Buffer descriptors carry guest VAs + sizes; handlers access them **only** through `vmm_guest_to_host(gva, size, perms)` — a descriptor is untrusted input, never a raw pointer.
 
@@ -1241,14 +1340,14 @@ Dozens of services × dozens of commands makes this the prime candidate for the 
 
 1. Parse decrypted NCA → ExeFS. ExeFS contains **NSO** executables (`rtld`, `main`, `subsdk*`, `sdk`): per-segment **LZ4-compressed** .text/.rodata/.data plus bss. The loader tree gains `nso.{h,c}` and `nro.{h,c}` (NRO is the homebrew format — required for the Phase 2 goal, not optional). LZ4 (single-file, BSD) joins the core dependency list; it is the only third-party code in `core/`.
 2. `npdm` supplies address-space type, main-thread priority/core/stack size, and the kernel capability list.
-3. Map NSOs at an ASLR'd base inside the 39-bit space; carve heap/alias/stack regions per the Horizon layout; vmm answers the `GetInfo` region queries from this same layout — one source of truth.
+3. Map NSOs at an ASLR'd base inside the 39-bit space; carve heap/alias/stack regions per the Horizon layout; vmm answers the `GetInfo` region queries from this same layout — one source of truth — and its total-memory queries report the application pool (§4).
 4. Allocate the main thread: TLS block, stack, and the Horizon entry ABI — **X0 = 0, X1 = main thread handle**, PC = rtld entry. From here the scheduler runs it like any other guest thread.
 
 ### hid: is a shared-memory service
 
-`hid:` IPC commands mostly activate npads and hand out a **shared-memory handle** (~0x40000 bytes). Games never poll input over IPC; they read per-npad state rings (17-entry, sampling-number-stamped) directly from that memory. The emulator's real obligation is therefore a **HID shared-memory writer**: a scheduler-tick-cadence task that transforms the §18 input region into the guest-visible HID layout — button/stick state, connection/style bits, incrementing sampling numbers. §18's seqlock region is the *host-side* transport; this writer is the *guest-side* contract. Implement the sampling-number ordering protocol for real from day one, even though green threading makes torn guest reads impossible today — under §7's per-core fork it becomes load-bearing, and retrofitting ordering into a writer games already depend on is the worst time to do it. The same shape recurs later for `time:` (clock-context shared memory).
+`hid:` IPC commands mostly activate npads and hand out a **shared-memory handle** (~0x40000 bytes). Games never poll input over IPC; they read per-npad state rings (17-entry, sampling-number-stamped) directly from that memory. The emulator's real obligation is therefore a **HID shared-memory writer**: a task on a virtual-time period (§7) that transforms the §18 input region into the guest-visible HID layout — button/stick state, connection/style bits, incrementing sampling numbers. §18's seqlock region is the *host-side* transport; this writer is the *guest-side* contract. Implement the sampling-number ordering protocol for real from day one, even though green threading makes torn guest reads impossible today — under §7's per-core fork it becomes load-bearing, and retrofitting ordering into a writer games already depend on is the worst time to do it. The same shape recurs later for `time:` (clock-context shared memory).
 
-The writer must present **N independent npads with per-controller style bits**, not just player 1 — this is the entire mechanism for same-console multiplayer (§20, surface 2). A writer that only populates the first npad silently breaks every couch co-op title. The §18 input region is already sized for 8 controllers; the obligation is that the HID layout reflects each connected controller's style (handheld / dual / single-L / single-R) and connection state independently.
+The writer must present **N independent npads with per-controller style bits**, not just player 1 — this is the entire mechanism for same-console multiplayer (§20, surface 2). A writer that only populates the first npad silently breaks every couch co-op title. The §18 input region is already sized for 8 controllers; the obligation is that the HID layout reflects each connected controller's style (handheld / dual / single-L / single-R) and connection state independently. The writer also fills each npad's six-axis state and the touch-screen state from the input region, and drains vibration values and player LEDs into §18's output region (v3.29).
 
 ### Firmware-free policy
 
@@ -1409,7 +1508,7 @@ flowchart LR
 
 Command records reference guest memory (vertex/index/uniform data, textures) by guest physical ranges resolved by the CPU-side decoder; the GPU Worker reads them through its guest-RAM view. Record format is versioned so the two workers can never silently disagree.
 
-**The reverse path: completions and syncpoints.** The command ring is CPU→GPU; fences need GPU→CPU. Games synchronise on **syncpoints** — u32 counters incremented on GPU work completion, waited on through nvhost-ctrl events. A small **GPU completion ring** (same SPSC discipline, opposite direction, in the §4 layout) carries `(syncpoint_id, value)` records from the GPU Worker back; the CPU Worker drains it at scheduler-tick cadence and signals the corresponding kernel wait objects. The vsync event games wait on is the same mechanism driven by the frame pacer.
+**The reverse path: completions and syncpoints.** The command ring is CPU→GPU; fences need GPU→CPU. Games synchronise on **syncpoints** — u32 counters incremented on GPU work completion, waited on through nvhost-ctrl events. A small **GPU completion ring** (same SPSC discipline, opposite direction, in the §4 layout) carries `(syncpoint_id, value)` records from the GPU Worker back; the CPU Worker drains it at scheduler-tick cadence and signals the corresponding kernel wait objects. Each push also bumps the CPU Worker's wake word, so an idle CPU Worker wakes at once (§6). The vsync event games wait on is the same mechanism driven by the frame pacer.
 
 **The present path is vi:, not raw framebuffers.** `vi:` + the buffer-queue service (`IHOSBinderDriver`, Android BufferQueue semantics over parcels) is how a game's completed frame reaches the display: the game dequeues a buffer, renders into it via nvdrv, queues it back. Voland's buffer-queue implementation feeds queued buffers into the §6 framebuffer-slot handoff (or, past Phase 4, directly into the GPU Worker's composition). The §6 slots are the *transport*; vi/BufferQueue is the *contract* games program against.
 
@@ -1475,14 +1574,19 @@ Two tiers, not four backends — hand-written Metal and D3D12 backends **do not 
 - **Tier 1 (every platform, web included): one C renderer against the standard `webgpu.h`** — compiled natively linking Dawn or wgpu-native (both implement the header; writing to it keeps either viable), and to WASM via **emdawnwebgpu** for the web. Not Emscripten's `-sUSE_WEBGPU`: that binding is unmaintained and frozen against an old header revision; emdawnwebgpu is Dawn's own Emscripten binding, tracking the stabilized header (futures-based async, string views). One implementation of the texture cache, pipeline cache, and the compute-shader fallbacks for WebGPU's Maxwell gaps (geometry shaders, transform feedback) — the alternative is two complete renderers (TS + C) drifting forever, every golden-image bug debugged twice.
 - **Tier 2 (performance, later, one codebase): `GPU_BACKEND_VULKAN`** — Windows/Linux/Android, justified only where device features pay measurably over Tier 1 (native geometry shaders, transform feedback, bindless). Apple via MoltenVK only if profiling ever demands it.
 
-On web, the renderer ships as a **second WASM module instantiated in the GPU Worker**, importing the same shared memory and reading the command ring, completion ring, and guest RAM directly through §4 layout offsets (WebGPU objects are worker-local; all GPU work already lives there). The GPU Worker's TS reduces to module loader, canvas/present glue, WebCodecs decode, and the Phase 3 blit path. The precise rule the old "no webgpu.h on web" statement was protecting survives narrowed: **no WebGPU bindings in the CPU Worker's core module, ever** — the renderer is a separate module in the GPU Worker. The contract between CPU side and renderer is the versioned command stream on every platform. `compile_shader` takes decompiled source; decompiler outputs are **WGSL primary** (Dawn/wgpu ingest it everywhere) and **SPIR-V second** (Tier 2 Vulkan only) — the MSL and HLSL backends are deleted.
+On web, the renderer ships as a **second WASM module instantiated in the GPU Worker**, importing the same shared memory (wasm32, §4; how two modules share it is gate 3 below) and reading the command ring, completion ring, and guest RAM directly through §4 layout offsets (WebGPU objects are worker-local; all GPU work already lives there). The GPU Worker's TS reduces to module loader, canvas/present glue, WebCodecs decode, and the Phase 3 blit path. The precise rule the old "no webgpu.h on web" statement was protecting survives narrowed: **no WebGPU bindings in the CPU Worker's core module, ever** — the renderer is a separate module in the GPU Worker. The contract between CPU side and renderer is the versioned command stream on every platform. `compile_shader` takes decompiled source; decompiler outputs are **WGSL primary** (Dawn/wgpu ingest it everywhere) and **SPIR-V second** (Tier 2 Vulkan only) — the MSL and HLSL backends are deleted.
 
-Two gates before renderer C is written (Phase 3 spike; clean fallback = the TS drainer, i.e., status quo, never a crisis):
+Three gates before renderer C is written (Phase 3 spike; clean fallback = the TS drainer, i.e., status quo, never a crisis):
 
-1. **memory64 import is a hard gate:** the renderer module must import the shared memory64 memory — a wasm32 module cannot (memory type mismatch), and copying guest texture/vertex data across a module boundary erases the point. Verify emdawnwebgpu × `MEMORY64` × `SHARED_MEMORY` before anything else — and **audit the generated JS glue for 32-bit truncation idioms**, the real failure class: `>>> 0`, `| 0`, `HEAPU32` indexing, any path keeping 32 bits of a pointer silently corrupts every offset above 4GB, which is where guest RAM lives. (JS Number precision is *not* the issue — 5.25GB addresses fit in 2^33, far under 2^53.) Audit targets: the BigInt↔Number boundary and specifically the data-pointer paths (`writeBuffer`, texture upload, mapped ranges) that take heap offsets into the >4GB region.
+1. **Shared wasm32 import, and pointers above 2 GiB** (v3.29; through v3.28 this gate was "memory64 import"). The renderer imports the core's shared wasm32 memory, which is emdawnwebgpu's mainstream configuration, so v3.28's worry about memory64 glue is gone. What remains is the same failure class turned around: most of guest RAM sits above 2 GiB, so any glue path that treats a pointer as signed (`| 0`, `HEAP32`-style indexing, a missing `>>> 0`) corrupts every offset up there. Audit the data-pointer paths (`writeBuffer`, texture upload, mapped ranges) on the pinned toolchain.
 2. **Per-call WASM→JS marshalling is measured, not assumed away:** the C renderer pays a trampoline per WebGPU call, thousands per frame on draw-heavy titles, where the TS drainer called the browser API directly. Viable (major engines ship through these bindings) but mitigation vocabulary — render bundles, encoder batching — is designed in from the first command-stream consumer, not retrofitted.
+3. **Two modules, one memory: decide the linking first** (v3.29). The renderer is linked on its own but instantiated against the core's memory. By default an Emscripten module puts its static data at `GLOBAL_BASE` and its stack and `malloc` heap after it, so two separately linked modules land on the same addresses and corrupt each other. Two ways out, chosen by the Phase 3 spike:
+   - **Relocatable renderer, disjoint range.** Build the renderer position-independent and instantiate it with its memory base inside a region the core's layout reserves; its static data, stack and allocator stay in that region. This keeps the rule above: no WebGPU bindings in the CPU Worker's core module.
+   - **One program, two instances.** Link the renderer into the core program and run the GPU Worker as an Emscripten pthread holding the transferred OffscreenCanvas, so static data and the allocator are shared by construction (`PTHREAD_POOL_SIZE=1`, §24). This puts WebGPU imports into the module the CPU Worker instantiates, so the rule above would narrow to "the CPU Worker never calls them".
 
-WebGPU-in-worker (transferred OffscreenCanvas, `getContext("webgpu")`, adapter/device, render pass inside a DedicatedWorker) is verified working on current Chromium, Firefox, and Safari 26; the Playwright matrix asserts it per engine as a regression guard, since worker-context capabilities have shifted across Safari point releases before.
+   Either way, the renderer's heap is a line in §4's host budget.
+
+WebGPU-in-worker (transferred OffscreenCanvas, `getContext("webgpu")`, adapter/device, render pass inside a DedicatedWorker) is verified working on current Chromium, Firefox, and Safari 26; the Playwright matrix is meant to assert it per engine as a regression guard (today it runs Chromium only and no test covers WebGPU; §16 browser table), since worker-context capabilities have shifted across Safari point releases before.
 
 Frame interpolation is removed (see §1.5): the premise that motion vectors could be harvested from the Maxwell engine was false.
 
@@ -1594,6 +1698,10 @@ Per §11: PTC entries are position-independent region function bodies, keyed by 
 - **Order:** `lastUsedAt` ascending, per-title
 - **Never evicts:** save data, settings, user-supplied content
 
+### Durability: ask for persistent storage (v3.29)
+
+Voland's own LRU never evicts saves, but the browser can. Origin storage is best-effort until the site is granted persistence, and best-effort data can be cleared under storage pressure or by browser policy; Safari's rule for sites without user interaction in seven days is the sharpest case. Before the first save write, call `navigator.storage.persist()`. If it is denied, keep a visible notice that saves can be lost, pointing to the backup backends below. `navigator.storage.estimate()` feeds the soft cap, so Voland's eviction starts before the browser's quota does.
+
 ### "Increase performance for others" toggle (local-only, per §1.6)
 
 - **Off (default):** PTC written to OPFS under normal LRU.
@@ -1626,15 +1734,26 @@ interface SaveSyncBackend {
 
 Directory/file handles persist in IndexedDB; permission is re-confirmed once per browser session via `handle.requestPermission({ mode: "read" })`.
 
-The picker methods (`showDirectoryPicker` etc.) are **permanently Chromium-only**: Mozilla holds a negative standards position and Apple has not committed to shipping them. This is a standards split, not a lag — and with WebGPU and memory64 now cross-browser, FSA pickers are the *only* thing between Safari 26 / Firefox users and running Voland, so the fallback is a requirement, not a nicety:
+The picker methods (`showDirectoryPicker` etc.) are **permanently Chromium-only**: Mozilla holds a negative standards position and Apple has not committed to shipping them. This is a standards split, not a lag — and with WebGPU cross-browser and the web build on wasm32 (§4), FSA pickers are the *only* thing between Safari 26 / Firefox users and running Voland, so the fallback is a requirement, not a nicety:
 
 - **Fallback path (Firefox, Safari):** `<input type="file" multiple>` per session. Hold the returned `File` objects; random access works fine via `blob.slice()` for RomFS reads. No persistence — the user re-picks their game files each session, with a one-line banner explaining why. Feature-detect on `"showDirectoryPicker" in window`.
 - **Never** fall back to copying multi-GB game files into OPFS.
 - Large mod packs on non-Chromium follow the same per-session pattern.
 
+Both paths end in `File` objects: a handle's `getFile()` on Chromium, the input element elsewhere. So the CPU Worker receives `File[]` (§16; a title is several NCAs) and reads slices synchronously with `FileReaderSync`, which dedicated workers have. That is how `byte_source`'s synchronous read callback is served on web (§12).
+
 ### OPFS sync access handles
 
 Cache reads on hot paths use `createSyncAccessHandle()` inside a Worker — synchronous, no promise overhead. Never the async OPFS API on a hot path. Unchanged from v2.
+
+### Save states: the contract binds now (v3.29)
+
+Save states appear in the worker protocol (§16) and the companion app (§22) and land in Phase 7, but their contract binds now, while the HLE services are being written:
+
+- **Captured:** the guest RAM pages `page_allocator` has handed out, every guest thread's `CPU_State`, kernel objects and the handle table, every HLE service's state, virtual time (§7), and the guest-visible GPU state (syncpoints, nvdrv and nvmap objects; guest GPU memory is guest RAM).
+- **Rebuilt, never captured:** predecoded records, regions and table slots (§11), compiled modules, the renderer's caches.
+- **Service state is plain data.** It holds guest addresses, handles and indices, never host pointers of any kind; interfaces are referenced by ID. §5's borrow rule already forbids storing host pointers. Each service also registers a versioned serialize/deserialize pair, and a service that can't serialize blocks save states, visibly, for the titles that reach it.
+- **Versioned.** A state from another format version is refused, never migrated silently. The format is documented in `docs/SAVE_FORMAT.md` (planned, §2).
 
 ---
 
@@ -1689,7 +1808,8 @@ flowchart TD
     FATAL["fatal error (specific cause)"]
     WGPU{"navigator.gpu?"}
     OPFS{"OPFS available?"}
-    MEM["create ONE WebAssembly.Memory<br/>(shared, address:'i64',<br/>initial === maximum)"]
+    LOCK{"instance lock<br/>(Web Locks) acquired?"}
+    MEM["create ONE WebAssembly.Memory<br/>(shared, wasm32,<br/>initial === maximum<br/>= 65535 pages)"]
     MEMFAIL{"allocation<br/>succeeded?"}
     CANVAS["transfer canvas →<br/>OffscreenCanvas"]
     WORKERS["start cpu.worker (instantiates core,<br/>reads layout_get()),<br/>gpu.worker, register audio worklet"]
@@ -1703,7 +1823,9 @@ flowchart TD
     WGPU -->|no| FATAL
     WGPU -->|yes| OPFS
     OPFS -->|no| FATAL
-    OPFS -->|yes| MEM
+    OPFS -->|yes| LOCK
+    LOCK -->|"no: running<br/>in another tab"| FATAL
+    LOCK -->|yes| MEM
     MEM --> MEMFAIL
     MEMFAIL -->|"no (see risk register)"| FATAL
     MEMFAIL -->|yes| CANVAS --> WORKERS --> LAYOUT --> APP
@@ -1738,26 +1860,25 @@ async function boot(): Promise<void> {
     return;
   }
 
+  // One instance per origin (§16, below): a second tab allocates nothing.
+  if (!(await acquireInstanceLock())) {      // navigator.locks, ifAvailable: true
+    showFatalError("Voland is already running in another tab.");
+    return;
+  }
+
   // ONE memory. Guest RAM lives inside it (§4). No separate SABs.
-  //
-  // Corrected against the shipped API (Phase 0 implementation, verified
-  // against both V8 and Emscripten's own -m64 (wasm64) glue output): the
-  // descriptor key is `address: "i64"` with BigInt page counts, not
-  // `index: "i64"` with Number page counts as earlier drafts of this
-  // section had it. `index` is silently ignored as an unrecognized
-  // property - the memory it produces is an ordinary 32-bit one, which
-  // then throws RangeError the instant TOTAL_MEMORY_PAGES exceeds the
-  // wasm32 cap of 65536 pages (4GiB), which it always does here.
+  // wasm32 (v3.29): Number page counts and no `address` key. memory64
+  // needed `address: "i64"` with BigInt counts (an `index` key is
+  // silently ignored); §4 keeps that for Switch 2.
   let memory: WebAssembly.Memory;
   try {
     memory = new WebAssembly.Memory({
-      initial: TOTAL_MEMORY_PAGES,   // BigInt; ≈ 5.25GB in 64KB pages
-      maximum: TOTAL_MEMORY_PAGES,   // fixed: views never detach
+      initial: TOTAL_MEMORY_PAGES,   // 65535: 4 GiB minus one 64KB page (§4)
+      maximum: TOTAL_MEMORY_PAGES,   // fixed: views never go stale
       shared:  true,
-      address: "i64",                // memory64
-    } as WebAssembly.MemoryDescriptor);
+    });
   } catch {
-    showFatalError("Could not allocate emulator memory (~5.25GB). Your browser or device limits shared memory; use a native build.");
+    showFatalError("Could not allocate emulator memory (~4GB). Your browser or device limits shared memory; use a native build.");
     return;
   }
 
@@ -1821,9 +1942,9 @@ Per §6, per-frame data (input, frames, audio, GPU commands) never travels over 
 // Main → CPU Worker
 type MainToCPUMessage =
   | { type: "init";       memory: WebAssembly.Memory }
-  | { type: "load-game";  titleId: string; fileHandle: FileSystemFileHandle }
+  | { type: "load-game";  titleId: string; files: readonly File[] }  // every NCA of the title (§15)
   | { type: "pause" } | { type: "resume" }
-  | { type: "save-state"; slot: number } | { type: "load-state"; slot: number }
+  | { type: "save-state"; slot: number } | { type: "load-state"; slot: number }  // Phase 7 (§15)
   | { type: "controller-connected";    index: number; profileId: string }
   | { type: "controller-disconnected"; index: number };
 
@@ -1852,6 +1973,8 @@ type CompilerToCPUMessage =
   | { readonly batchId: number; readonly error:  string };
 ```
 
+The CPU Worker handles these between slices, so a message waits at most one slice (about 4ms) after it is posted (§6).
+
 ### Service Worker
 
 Cache strategy unchanged from v2 (shell cache-first, `.wasm` aggressively cache-first, `/api/` network-only, rest network-first) with `addCrossOriginIsolationHeaders()` applied to every served response.
@@ -1859,6 +1982,30 @@ Cache strategy unchanged from v2 (shell cache-first, `.wasm` aggressively cache-
 ### Progressive enhancement
 
 Capability detection (`webGPU`, `opfs`, `crossOriginIsolated`, `showDirectoryPicker`, WebHID, WebNFC, wake lock, vibration) as in v2; hard requirements fail at boot, the rest degrade per-feature.
+
+### One instance per origin (v3.29)
+
+Boot takes a Web Lock (`navigator.locks`, `ifAvailable: true`) and holds it for the page's lifetime. A second tab that can't get it shows "already running" and allocates nothing. Two instances would mean two ~4 GiB allocations, a fight over OPFS's exclusive sync access handles (the PTC and pipeline cache, §15), and two writers for one title's saves.
+
+### Browser requirements (v3.29)
+
+One table for every browser fact this document relies on.
+
+| Feature | Needed for | Chromium | Firefox | Safari | Asserted by e2e |
+|---|---|---|---|---|---|
+| Cross-origin isolation (`SharedArrayBuffer`) | §4, §6 | 92 | 79 | 15.2 | Chromium |
+| Shared wasm32 memory of 65535 pages | §4 | to verify | to verify | to verify | Chromium, after the §25 wasm32 task |
+| Wasm SIMD128 | §10, §24 | 91 | 89 | 16.4 | — |
+| `Atomics.waitAsync` | §6 | 87 | 145 | 16.4 | — |
+| WebGPU | §13 | 113 | 141 (Windows; Linux and Android rolling out) | 26 | — |
+| WebGPU in a worker (transferred `OffscreenCanvas`) | §6, §13 | current | current | 26 | — (checked by hand, §13) |
+| OPFS sync access handles in workers | §15 | 102 | 111 | to verify | — |
+| Web Locks | §16 | 69 | 96 | 15.4 | — |
+| AudioWorklet | §14 | 66 | 76 | 14.1 | — |
+| WebCodecs `VideoDecoder` (Phase 6) | §13 | 94 | 130 | 16.4 | — |
+| memory64 | not required (§4) | 133 | 134 | not shipped (October 2026) | — |
+
+The browser columns give the first release with the feature, from vendor release notes; they were recorded in v3.29 and Voland has not verified them. "To verify" means nobody has checked. The last column is what the Playwright e2e asserts today. `playwright.config.ts` runs Chromium only, so adding Firefox and WebKit projects is part of the §25 wasm32 task: Safari is the reason for it.
 
 ---
 
@@ -1868,15 +2015,17 @@ All native platforms link the C core directly. No IPC between UI and core — fu
 
 ### Platform matrix
 
-| Platform | UI | Renderer | Audio | JIT path | Distribution |
+| Platform | UI | Renderer | Audio | CPU execution | Distribution |
 |---|---|---|---|---|---|
-| Web | Solid.js | WebGPU | AudioWorklet (§14) | WASM bytecode | URL / PWA |
-| iOS / iPadOS | SwiftUI | WebGPU-native (Dawn→Metal) | CoreAudio | needs `dynamic-codesigning` | Sideload (AltStore) |
-| tvOS / visionOS | SwiftUI (+focus / RealityKit) | WebGPU-native (Dawn→Metal) / CompositorServices | CoreAudio | same as iOS | Sideload |
-| Android / Android TV | Jetpack Compose | WebGPU-native (Dawn→Vulkan); Vulkan tier 2 | AAudio | mmap + mprotect | APK sideload |
-| macOS | SwiftUI | WebGPU-native (Dawn→Metal) | CoreAudio | mmap + mprotect | Direct download, notarised |
-| Windows | Qt over voland-cli core | WebGPU-native (Dawn→D3D12); Vulkan tier 2 | WASAPI | VirtualAlloc | Direct download |
-| Linux | Qt over voland-cli core | WebGPU-native (Dawn→Vulkan); Vulkan tier 2 | PipeWire | mmap + mprotect | Direct download |
+| Web | Solid.js | WebGPU | AudioWorklet (§14) | `wasm_jit` → the browser's WASM tiers | URL / PWA |
+| iOS / iPadOS | SwiftUI | WebGPU-native (Dawn→Metal) | CoreAudio | predecoded interpreter (no native JIT, below) | Sideload (AltStore) |
+| tvOS / visionOS | SwiftUI (+focus / RealityKit) | WebGPU-native (Dawn→Metal) / CompositorServices | CoreAudio | predecoded interpreter | Sideload |
+| Android / Android TV | Jetpack Compose | WebGPU-native (Dawn→Vulkan); Vulkan tier 2 | AAudio | predecoded interpreter | APK sideload |
+| macOS | SwiftUI | WebGPU-native (Dawn→Metal) | CoreAudio | predecoded interpreter; ballistic-x86 on Intel Macs once unlocked (§10) | Direct download, notarised |
+| Windows | Qt over voland-cli core | WebGPU-native (Dawn→D3D12); Vulkan tier 2 | WASAPI | predecoded interpreter; ballistic-x86 once unlocked (§10) | Direct download |
+| Linux | Qt over voland-cli core | WebGPU-native (Dawn→Vulkan); Vulkan tier 2 | PipeWire | predecoded interpreter; ballistic-x86 once unlocked (§10) | Direct download |
+
+No native build JITs on an ARM64 host (v3.29): `wasm_jit` is web-only and Ballistic is x86-only (§10). On ARM64 devices the web build, running in the platform's browser, is the fast path.
 
 **Desktop UI is Qt, deliberately.** WinUI 3 + GTK would replace one codebase with two (and add C++/WinRT) for zero functional gain — and Voland already carries SwiftUI, Compose, and Solid.js. UI count is a **security variable**: every toolkit reimplements the §19/§20 consent flows, whose wording and structure are load-bearing. All UI implementations render those screens from a normative spec, `docs/CONSENT_FLOWS.md` — toolkit divergence in consent language is a review rejection.
 
@@ -1901,17 +2050,11 @@ One consolidation has defensible arithmetic and is the named Phase 8 revisit opt
 
 The desktop core ships first as a CLI with **zero Qt dependency** — because the test infrastructure requires it, not as a convenience: Phase 3/4 golden-image tests and native differential runs (interpreter vs. Unicorn, and vs. ballistic-x86 if integrated; `wasm_jit` differentials run under Node and headless Chrome, §10) need a headless runner (offscreen render-to-texture via Dawn, hash, exit code). Subcommands: `run` (headless or windowed), `verify-dump` (hash-check decrypted input without booting), `ptc-precompile`, `cache` (inspect/evict), `save-export`/`save-import`. CI links voland-cli, never a GUI toolkit. The Phase 8 Qt app is a frontend over the same core — by then battle-tested by every CI run since Phase 3 — and the CLI doubles as the integration point for launcher frontends (EmulationStation-class).
 
-**Xbox is demoted from the committed matrix to exploratory.** Three reasons, each sufficient: Dev-Mode sideloaded apps are memory-capped on older hardware well below Voland's ~5GB working set (must be re-verified against current caps per console generation before any commitment); the WinUI 2 / UWP stack is deprecated; and it competes for effort with platforms that reach more users. Two more make it categorical: JIT is Dev-Mode-only (retail UWP bans dynamic code generation, so distribution is a null set), and even the browser path fails — Edge on Xbox lives under the same memory regime, so the boot-time ~5.25GB allocation is refused at step one. **The exit condition is platform convergence, not porting effort:** if Microsoft's Windows/Xbox convergence direction ships consoles that run Windows applications, the Windows build works there unmodified and this row resurrects for free. Until then, no Xbox-specific code is written.
+**Xbox is demoted from the committed matrix to exploratory.** Three reasons, each sufficient: Dev-Mode sideloaded apps are memory-capped on older hardware well below Voland's ~4GB working set (must be re-verified against current caps per console generation before any commitment); the WinUI 2 / UWP stack is deprecated; and it competes for effort with platforms that reach more users. Two more make it categorical: JIT is Dev-Mode-only (retail UWP bans dynamic code generation, so distribution is a null set), and even the browser path fails — Edge on Xbox lives under the same memory regime, so the boot-time ~4GB allocation is refused at step one. **The exit condition is platform convergence, not porting effort:** if Microsoft's Windows/Xbox convergence direction ships consoles that run Windows applications, the Windows build works there unmodified and this row resurrects for free. Until then, no Xbox-specific code is written.
 
-### iOS JIT entitlement
+### iOS: no native JIT; the web build is the fast path (v3.29)
 
-Without `dynamic-codesigning` (sideload-only), dynamic `WebAssembly.compile()` is throttled and performance is interpreter-level. Apple can revoke the path by policy — §28.
-
-```xml
-<!-- ios/Entitlements.plist, sideload build only -->
-<key>dynamic-codesigning</key>
-<true/>
-```
+The native iOS app runs the predecoded interpreter. There is no native JIT on ARM64 hosts (§10), so the `dynamic-codesigning` entitlement buys nothing, and v3.29 drops it (through v3.28 this section asked for it). Safari's own engine compiles `wasm_jit` output with no entitlement, so on iOS the PWA is the fast path, provided iOS Safari accepts the ~4 GiB shared allocation and keeps the tab alive under its process memory limits (§16 browser table, §28). Apple's sideloading policy now affects only the native app's distribution, not performance.
 
 ---
 
@@ -1922,16 +2065,37 @@ Without `dynamic-codesigning` (sideload-only), dynamic `WebAssembly.compile()` i
 v2 forwarded gamepad state via postMessage every rAF: per-frame allocation, a task-queue hop of latency, and dead input in throttled tabs. Replaced by direct shared-memory writes:
 
 ```
-INPUT_REGION_BASE: per controller slot (×8):
+INPUT_REGION_BASE: per controller slot (×8, 64 bytes; v3.29 adds motion):
   +0    sequence counter (u32, atomic)   // seqlock
   +4    buttons bitmask  (u32)
   +8    axes             (8 × i16)
-  +24   flags            (u32: connected, profile id)
+  +24   flags            (u32: connected, npad style §12, profile id)
+  +28   motion sample    (u32: increments per new IMU sample; 0 = no sensor)
+  +32   accelerometer    (3 × f32, g)
+  +44   gyroscope        (3 × f32, rad/s)
+  +56   reserved         (8 bytes)
+then one touch block (v3.29):
+  +0    sequence counter (u32, atomic)   // seqlock
+  +4    point count      (u32, ≤ 10)
+  +8    points ×10       (finger id u32, x f32, y f32, in 1280×720 screen space)
 ```
 
 - **Main thread (writer), each rAF:** bump sequence to odd → write payload → bump to even (release ordering).
 - **CPU Worker `hid:` service (reader), at guest HID poll rate:** read sequence (acquire); if odd, or changed across the payload read, retry. No torn reads, no waiting, no allocation.
 - Connect/disconnect/profile changes go over postMessage (lifecycle events, §16).
+
+**Output region (v3.29): rumble and player LEDs, CPU → main.** Games send vibration values and set player LEDs through `hid:`. Per-frame data can't ride postMessage, so it travels back the way input arrives:
+
+```
+OUTPUT_REGION_BASE: per controller slot (×8, 32 bytes):
+  +0    sequence counter (u32, atomic)   // seqlock; writer = CPU Worker hid:
+  +4    low band         (amplitude f32, frequency f32 Hz)
+  +12   high band        (amplitude f32, frequency f32 Hz)
+  +20   player LEDs      (u32 bitmask)
+  +24   reserved         (8 bytes)
+```
+
+The main thread reads it each rAF and drives `GamepadHapticActuator` (dual-rumble) for standard pads, or HD Rumble reports over WebHID for Joy-Con and Pro Controllers.
 
 Hidden-tab behavior is covered by the auto-pause policy in §16.
 
@@ -1940,9 +2104,10 @@ Hidden-tab behavior is covered by the auto-pause policy in §16.
 ```mermaid
 flowchart LR
     GP["Gamepad API"]
-    KB["Keyboard / pointer"]
+    KB["Keyboard / pointer<br/>(canvas touch → touch block)"]
     HID["WebHID (Joy-Con,<br/>Pro Controller)"]
     NFC["WebNFC (physical amiibo,<br/>Chrome Android only)"]
+    MOT["DeviceMotion (phones);<br/>Joy-Con / Pro IMU via WebHID"]
     MAIN["Main thread"]
     REGION["Input region<br/>(seqlock, linear memory)"]
     CPU["CPU Worker: hid:/nfc: HLE"]
@@ -1951,6 +2116,7 @@ flowchart LR
     KB --> MAIN
     HID --> MAIN
     NFC --> MAIN
+    MOT --> MAIN
     MAIN --> REGION --> CPU
 ```
 
@@ -2222,12 +2388,13 @@ Lives in linear memory at `layout.traceBufferBase` (§4).
 
 ```c
 // core/common/log.h — 24 bytes/event
-typedef struct __attribute__((packed)) Trace_Event {
-  uint64_t timestamp_ns;
+typedef struct Trace_Event {    // naturally 24 bytes: no packing attribute (§25 portability rule)
+  uint64_t timestamp_ns;   // wall clock, one epoch for every writer (below)
   uint32_t event_type;    // TRACE_SVC, TRACE_GPU_CMD, TRACE_AUDIO_UNDERRUN, ...
   uint32_t thread_id;
   uint32_t payload[2];
 } Trace_Event;
+_Static_assert(sizeof(Trace_Event) == 24, "layout shared with JS readers");
 
 #define TRACE_BUFFER_CAPACITY 65536
 // +0: write index (Int32, atomic fetch_add — the buffer is MULTI-WRITER TODAY:
@@ -2239,6 +2406,8 @@ typedef struct __attribute__((packed)) Trace_Event {
 void trace_emit(uint32_t event_type, uint32_t thread_id,
                 uint32_t payload0, uint32_t payload1);
 ```
+
+Timestamps are wall-clock nanoseconds on one epoch (v3.29): each writer adds `performance.timeOrigin` to `performance.now()`, because every worker's `now()` starts at its own origin (native: the monotonic clock). Events that need virtual time (§7) carry it in their payload.
 
 ### Public interface for the Chrome extension
 
@@ -2268,53 +2437,59 @@ Debug Emscripten builds link the core as `MAIN_MODULE=1` with each HLE service a
 ### CMake options
 
 ```cmake
-option(CPU_BACKEND   "noop|interpreter|wasm_jit|ballistic" "noop")  # wasm_jit: web only
-option(GPU_BACKEND   "webgpu|vulkan|metal|d3d12|auto"      "auto")
-option(AUDIO_BACKEND "wasapi|coreaudio|pipewire|none|auto" "auto")  # web: none (§14)
+# String choices are cache variables; option() is boolean-only.
+set(CPU_BACKEND   "noop" CACHE STRING "noop|interpreter|wasm_jit|ballistic")  # wasm_jit: web only, Phase 5
+set(GPU_BACKEND   "auto" CACHE STRING "webgpu|vulkan|auto")                   # no metal/d3d12 (§13)
+set(AUDIO_BACKEND "auto" CACHE STRING "wasapi|coreaudio|pipewire|none|auto")  # web: none (§14)
 ```
 
 ### WASM build flags
 
 ```cmake
 if(EMSCRIPTEN)
-  # wasm64 and pthreads change codegen, not just link behavior: both flags
-  # go on the compile AND link lines or objects come out wasm32.
+  # pthreads change codegen (shared-memory atomics), not just link behavior:
+  # the flags go on the compile AND link lines.
   set(VOLAND_WASM_CODEGEN_FLAGS
     -msimd128                 # REQUIRED: NEON → WASM SIMD; ~4x slowdown without
-    -m64                      # wasm64: REQUIRED for Switch 1, not just 2 (§4)
-    -pthread                  # implies SHARED_MEMORY
+    -pthread                  # implies SHARED_MEMORY (shared-memory atomics)
     -sSHARED_MEMORY=1         # redundant under -pthread; kept for explicitness
-  )
-  target_compile_options(switch_core PRIVATE ${VOLAND_WASM_CODEGEN_FLAGS})
-  target_link_options(switch_core PRIVATE
+  )                           # no -m64: the core is wasm32 (§4, v3.29)
+  add_compile_options(${VOLAND_WASM_CODEGEN_FLAGS})
+  add_link_options(
     ${VOLAND_WASM_CODEGEN_FLAGS}
     -sWASM=1
-    -sIMPORTED_MEMORY=1       # host creates the single WebAssembly.Memory (§16)
-    -sINITIAL_MEMORY=5637144576   # ≈5.25GB; must equal the host's initial; with
-                                  # growth disabled this IS the maximum — views
-                                  # never detach
+    -sIMPORTED_MEMORY=1           # host creates the single WebAssembly.Memory (§16)
+    -sINITIAL_MEMORY=4294901760   # 65535 pages: 4 GiB minus one page (§4); must equal
+                                  # the host's initial; with growth disabled this IS
+                                  # the maximum
     -sALLOW_MEMORY_GROWTH=0       # fixed at boot (§4); never enable
-    -sPTHREAD_POOL_SIZE=8
-    -sEXPORTED_FUNCTIONS='["_emulator_create","_emulator_destroy",
-                            "_scheduler_tick","_layout_get",
-                            "_cpu_get_reg","_cpu_set_reg"]'
-    -sEXPORTED_RUNTIME_METHODS='["ccall","cwrap"]'
+    -sMODULARIZE=1                # a factory function, not a self-executing script
+    -sEXPORT_ES6=1                # ...as an ES module, so cpu.worker.ts can import() it
+    -sEXPORT_NAME=createVolandCoreModule
+    -sENVIRONMENT=worker          # only ever instantiated inside cpu.worker.ts
+    "-sEXPORTED_FUNCTIONS=['_emulator_create_ffi','_emulator_destroy_ffi',
+                            '_emulator_run_ffi','_emulator_step_ffi',
+                            '_layout_get_ffi','_cpu_backend_id_ffi',
+                            '_cpu_get_reg_ffi','_cpu_set_reg_ffi','_cpu_get_pc_ffi']"
+    "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
   )
 endif()
 ```
+
+**Pending (§25 Phase 1, wasm32 memory model):** until that task lands, `CMakeLists.txt` still builds wasm64 (`-m64`, `INITIAL_MEMORY=5637144576`) with `PTHREAD_POOL_SIZE=8`, and `main.ts` still creates the memory64 descriptor. The block above is the target. `PTHREAD_POOL_SIZE` is dropped (default 0) because the core creates no threads (§7); it returns as 1 only if §13 gate 3 runs the renderer as an Emscripten pthread.
 
 Flag spellings are pinned to what Emscripten 6.0.9 accepts without `-Wdeprecated`. The following are **deliberately absent** and must not be reintroduced:
 
 | Absent flag | Why |
 |---|---|
-| `-sMEMORY64=1` | Deprecated alias of the standard Clang `-m64`. Verified on 6.0.9: `-m64` alone yields identical glue (`address:"i64"`, `shared:true`) and a wasm64 module. |
+| `-m64` / `-sMEMORY64=1` | The core is wasm32 since v3.29 (§4); memory64 returns only with Switch 2. (`-sMEMORY64=1` was in any case a deprecated alias of Clang's `-m64` on 6.0.9.) |
 | `-sUSE_PTHREADS=1` | Deprecated alias of `-pthread`, which also implies `SHARED_MEMORY`. |
-| `-sWASM_BIGINT=1` | On by default, and mandatory under wasm64 (i64 addresses cross the JS boundary as BigInt). A no-op. |
-| `-sMAXIMUM_MEMORY=…` | With `ALLOW_MEMORY_GROWTH=0`, `INITIAL_MEMORY` *is* the maximum; emcc warns that a separate `MAXIMUM_MEMORY` is meaningless. The invariant it documented — memory fixed at boot, `initial === maximum`, views never detach — lives on the `INITIAL_MEMORY`/`ALLOW_MEMORY_GROWTH` lines and in §4. |
+| `-sWASM_BIGINT=1` | On by default: `i64` values (guest registers, GVAs) still cross the JS boundary as BigInt, while pointers are Numbers under wasm32. A no-op. |
+| `-sMAXIMUM_MEMORY=…` | With `ALLOW_MEMORY_GROWTH=0`, `INITIAL_MEMORY` *is* the maximum; emcc warns that a separate `MAXIMUM_MEMORY` is meaningless. The invariant it documented — memory fixed at boot, `initial === maximum`, views never go stale — lives on the `INITIAL_MEMORY`/`ALLOW_MEMORY_GROWTH` lines and in §4. At 4 GiB on wasm32, verify on the pinned emcc that an `INITIAL_MEMORY` above 2 GiB alone switches the glue to unsigned pointers (§13 gate 1); revisit this row if it doesn't. |
 
-Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), memory pinned to the full layout size with growth disabled, memory64 reclassified from Switch 2 prep to a Switch 1 requirement. Changes in v3.21: flag spellings modernized (see table).
+Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), memory pinned to the full layout size with growth disabled, memory64 reclassified from Switch 2 prep to a Switch 1 requirement. Changes in v3.21: flag spellings modernized (see table). Changes in v3.29: wasm32 (§4); `PTHREAD_POOL_SIZE` dropped; the block synced with `CMakeLists.txt` (`MODULARIZE`, `EXPORT_ES6`, `EXPORT_NAME`, `ENVIRONMENT`, the `_ffi` exports).
 
-**Pending with `wasm_jit` (Phase 5), not added before then:** `-sALLOW_TABLE_GROWTH=1`. It lets the CPU worker grow the core's `funcref` table once, at boot, by the JIT slot capacity, so region functions can be `table.set` into reserved slots (§11, WASM_JIT.md J8.3). Table growth is unrelated to memory growth: `ALLOW_MEMORY_GROWTH=0` stays (§4). Before the flag lands, two things are verified on the pinned Emscripten: its spelling, and whether wasm64 builds export a 32- or 64-bit-indexed table (WASM_JIT.md J17).
+**Pending with `wasm_jit` (Phase 5), not added before then:** `-sALLOW_TABLE_GROWTH=1`. It lets the CPU worker grow the core's `funcref` table once, at boot, by the JIT slot capacity, so region functions can be `table.set` into reserved slots (§11, WASM_JIT.md J8.3). Table growth is unrelated to memory growth: `ALLOW_MEMORY_GROWTH=0` stays (§4). Before the flag lands, its spelling is verified on the pinned Emscripten. (WASM_JIT.md J17 also asked whether wasm64 builds export a 32- or 64-bit-indexed table; under wasm32 the table is 32-bit-indexed, which settles it.)
 
 ### Platform build targets
 
@@ -2359,14 +2534,15 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [x] Load executable sections into guest memory *through vmm mappings*
 - [x] **Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers** — the checkbox's four SVCs (UnmapMemory is MapMemory's inverse, named alongside the other three in §12's priority list). *v3.27: `hle/kernel/svc_memory.{h,c}`; register ABI and MapMemory/UnmapMemory semantics verified against libnx's `svc.s`/`svc.h`/`thread.c` rather than assumed (SetHeapSize's size arrives in X1, not X0). Two scoped-down simplifications, documented in `svc_memory.h` and the "Deviation" note after §12's HLE result type: UnmapMemory requires an exact match against a recorded MapMemory call (no partial unmap); QueryMemory's `MemoryInfo.type`/`attr` model only the address-space regions reachable by a Phase 1 title, not Horizon's full ~30-value enum. `page_allocator.h` gained the release path (a small freelist) it had already anticipated needing for SetHeapSize's shrink and process teardown. Full account in the Changelog v3.26 → v3.27 entry.*
 - [ ] Minimal IPC + sm: stub
-- [ ] Input region + seqlock writer/reader (§18)
+- [ ] **wasm32 memory model** (v3.29, §4): guest RAM sized to the application pool plus the HLE carve-out; `-m64` dropped and `INITIAL_MEMORY` set to 65535 pages (§24); `main.ts` and the bindings on Number pointers; native guest RAM reserved without committing; Firefox and WebKit Playwright projects, with e2e asserting the allocation per engine
+- [ ] Input region + seqlock writer/reader (§18; v3.29 layout with motion and touch, output region reserved)
 - [ ] User-facing error path for encrypted input → dumping guide
 
 ### Phase 2 — First Instructions
 
 - [ ] Interpreter backend (partial ARM64), all memory access via vmm. Its decoder is generated from ARM's machine-readable A64 spec and emits the record format `wasm_jit` shares (WASM_JIT.md J3), checked by Unicorn differential fuzzing (§10)
 - [ ] NRO loader — homebrew is this phase's proof of life
-- [ ] **Guest thread scheduler** (§7): bounded run, exit reasons, wait objects, virtual time
+- [ ] **Guest thread scheduler** (§7): virtual cores, bounded run, exit reasons, wait objects, virtual time and pacing; the CPU worker driver (§6)
 - [ ] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler
 - [ ] Basic IPC routing
 
@@ -2376,6 +2552,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [ ] NVDEC/VIC **syncpoint-signalling stub** (black frames that complete — cutscene titles deadlock without it, §13)
 - [ ] Framebuffer-blit path: double-buffered slots + publish counters (§6)
 - [ ] WebGPU renderer (texture upload + fullscreen quad), `Atomics.waitAsync` consumer
+- [ ] Renderer spike against §13's three gates (pointers above 2 GiB, per-call marshalling, two modules in one memory)
 - [ ] **voland-cli headless runner** (Dawn offscreen, golden-image hashing) — the native test harness (§17)
 
 ### Phase 4 — First Boot
@@ -2398,7 +2575,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 6 — System Features
 
-- [ ] Save data (OPFS), settings (IndexedDB), library/settings UI
+- [ ] Save data (OPFS) with a persistent-storage request (§15), settings (IndexedDB), library/settings UI
 - [ ] Compatibility DB in the library UI
 - [ ] Improved shader pipeline + ASTC transcode cache
 - [ ] **Real video decode**: WebCodecs path per §13 (bitstream reconstruction, block-linear write-back, VIC)
@@ -2410,11 +2587,12 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [ ] **Mod repositories** (add-a-repo, §19): manifest fetch + SHA-256-verified install/update; guest-side content only; zero shipped repos, no CORS proxy
 - [ ] **Save backup & sync framework** + Google Drive and OneDrive backends (§15) — depends only on Phase 6 OPFS saves; deliberately ahead of the companion server
 - [ ] AOT pre-translation (opt-in per game; the answer to per-session compile cost, §11)
+- [ ] Save states, on the contract in §15
 - [ ] Improved audio accuracy
 
 ### Phase 8 — Platform Expansion
 
-- [ ] Desktop Qt GUI over the voland-cli core, Android Compose UI, iOS SwiftUI (if the JIT entitlement path remains viable); consent screens per CONSENT_FLOWS.md across all UIs
+- [ ] Desktop Qt GUI over the voland-cli core, Android Compose UI, iOS SwiftUI (interpreter-only natively; the PWA is the fast iOS path, §17); consent screens per CONSENT_FLOWS.md across all UIs
 - [ ] Per-core-worker experiment, gated on single-worker profiling (§7)
 
 ### Phase 9 — Ecosystem & Polish
@@ -2455,7 +2633,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ---
 
-## 27. Reference Implementations
+## 27. Reference Material
 
 ### Ballistic
 
@@ -2467,10 +2645,11 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 | Component | Details |
 |---|---|
-| CPU | ARM Cortex-A57, 4 cores (3 for applications), 1.02GHz docked |
+| CPU | ARM Cortex-A57, 4 cores (3 for applications), 1.02GHz docked and handheld |
 | GPU | NVIDIA Maxwell, 768MHz docked |
-| RAM | 4GB LPDDR4 (~3.2GB application-usable) |
+| RAM | 4GB LPDDR4; application pool 3285 MiB in the 4 GB arrangement (§4) |
 | Guest VA space | 36-bit (1.x) / 39-bit (2.0+) |
+| System counter | `CNTFRQ_EL0` = 19.2 MHz (virtual time, §7) |
 | NFC | Type A/B (amiibo) |
 
 ### Specifications
@@ -2487,9 +2666,9 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 | Risk | Severity | Likelihood | Mitigation / Notes |
 |---|---|---|---|
 | Nintendo legal action | High | Medium | §1.6 posture (no decryption, no cache aggregation, no IP redistribution) puts Voland on the safer side of the line that killed Yuzu/Citra. Reduced, not zero. Maintainer should not host on personal infrastructure. Contributors WILL propose decryption patches; they must be rejected. |
-| Apple revokes `dynamic-codesigning` for sideloads | High | Low–medium | Apple-native ports fall to interpreter-only (too slow for AAA). Web platform unaffected — and the web *is* the primary target, which caps this risk's blast radius. |
-| **memory64 bounds-check overhead** | Medium | High (it exists; magnitude varies) | ~5–15% on memory-heavy code, engine-dependent — measurable per engine now that memory64 is cross-browser. Mitigation: hot host structs in the low 4GB (§4); named escape hatch is multi-memory, gated on toolchain support (§4). Separately: the ~16GB per-memory browser cap is a hard Switch 2 constraint (§4). |
-| ~5.25GB shared-memory allocation fails on constrained devices | Medium | Medium | Detect at boot, fail with a specific message directing to native builds (§16). No graceful degradation is possible — the address space is the requirement. |
+| iOS Safari refuses the ~4 GiB shared allocation, or kills the tab under its memory limits | High (iOS reach) | Medium | The native iOS app is interpreter-only (§17), so iOS performance rides on Safari. The e2e matrix checks the allocation per release (§16 browser table). Other platforms are unaffected. Replaces v3.28's `dynamic-codesigning` row: no native build JITs (§17). |
+| **Host memory outgrows the wasm32 budget** (≈709 MiB beside guest RAM, §4) | Medium | Medium | Per-subsystem caps with a defined behavior at the cap; caches evict through the invalidation path (§11). Escape routes, in order: tighten caps; move the renderer's heap out of the shared memory (§13 gate 3); memory64 as a second build, which costs Safari and bounds checks (§4). Separately, memory64's ~16GB per-memory cap is a hard Switch 2 constraint. |
+| ~4GB shared-memory allocation fails on constrained devices (5.25GB through v3.28) | Medium | Medium | Detect at boot, fail with a specific message directing to native builds (§16). No graceful degradation is possible — the address space is the requirement. |
 | Softmmu overhead makes web performance unplayable for heavy titles | Medium | Medium | Two-load walk is the floor; software TLB and contiguous-heap fast paths are the measured escalations (§5). If insufficient, lighter titles remain viable on web and heavy titles are a native-build recommendation. |
 | `wasm_jit` is a large, Voland-owned compiler effort | Medium–high for web perf | Medium | Tier 1 is direct translation over the predecoded records, with no compiler IR (§10); the browser's WASM tiers do register allocation and generic optimization. Coverage is incremental: untranslated instructions fall back to the interpreter, and per-form counters direct the work. The predecoded interpreter (§25 Phase 5) is a deliverable, so the web build works without the JIT. The shared generated decoder and Unicorn fuzzing exist from the Phase 2 interpreter, before the JIT starts. Contributor recruitment for it starts with Phase 5. |
 | Exact FP semantics (NaN fixups, emulated FMA) cost too much on FP-heavy titles | Medium | Medium | Measured per instruction form in Phase 5. The NaN fixup's common path is one compare. A relaxed-SIMD FMA path is gated on evidence that it fuses deterministically (WASM_JIT.md J11). Inexact opt-in modes are not offered (§3). Heavy titles fall back to the native-build recommendation, as in the softmmu row. |
@@ -2502,15 +2681,32 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 | ASTC transcoder bugs corrupt rendering | Low | Low | Cache key includes transcoder version; bump forces rebuild. |
 | WebRTC LDN timing differs from WiFi | Low–medium | High | Documented limitation; frame-perfect multiplayer titles may differ. Not a project-killer. |
 
-Removed from v2: the dynarmic row (dependency dropped), the frame-interpolation implications (feature deleted), and the Xbox rows (platform demoted to exploratory, §17). Added: memory64 overhead, softmmu performance, Ballistic contract rejection, PTC compile latency — the risks the v2 architecture couldn't see because it hadn't made the §1-Overview load-bearing decisions explicit. v3.28 replaced the three Ballistic rows with the `wasm_jit` effort, exact-FP cost, and optional ballistic-x86 rows.
+Removed from v2: the dynarmic row (dependency dropped), the frame-interpolation implications (feature deleted), and the Xbox rows (platform demoted to exploratory, §17). Added: memory64 overhead, softmmu performance, Ballistic contract rejection, PTC compile latency — the risks the v2 architecture couldn't see because it hadn't made the §1-Overview load-bearing decisions explicit. v3.28 replaced the three Ballistic rows with the `wasm_jit` effort, exact-FP cost, and optional ballistic-x86 rows. v3.29 replaced the memory64-overhead row with the wasm32 host-budget row, and the `dynamic-codesigning` row with the iOS Safari memory row.
 
-The format of this register is "what could go wrong," not "what will go wrong." The two genuine existential concerns remain Nintendo legal action and the Apple JIT entitlement; §1.6 addresses the first structurally, and web-primacy contains the second.
+The format of this register is "what could go wrong," not "what will go wrong." The genuine existential concern remains Nintendo legal action, which §1.6 addresses structurally. The Apple JIT entitlement, listed beside it through v3.28, no longer applies: no native build JITs (§17), and iOS reach now depends on Safari's memory limits (row above).
 
 ---
 
-*Document version: 3.28.0*
+*Document version: 3.29.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.28 → v3.29 (summary)
+
+- **§4 rewritten: the core is wasm32, and guest RAM is the application pool.** v3.28 called memory64 "mandatory for Switch 1" because guest RAM was sized at the console's full 4 GB. A retail title only gets the application pool (3285 MiB in the 4 GB arrangement); the rest of the console's memory belongs to the OS and applets, which Voland's HLE replaces. Guest RAM is now that pool plus a 48 MiB HLE carve-out, leaving ≈709 MiB of a 65535-page wasm32 memory for the host, budgeted per subsystem. Gains: Safari, which has not shipped memory64, can run Voland; engines elide bounds checks with guard regions; the boot allocation drops from 5.25 to 4 GiB; emdawnwebgpu runs in its mainstream configuration. memory64 stays the named Switch 2 path, not a second build. Also corrected: shared memories don't detach on grow (the fixed-size rationale is restated), and the "hot structures below 4GB" mitigation is gone. It was never implemented: `layout.c` carves guest RAM first, and the vmm L2 arena is a separate allocation.
+- **Ripple edits for wasm32:** §10 requirement 7 (shared wasm32 memory); region functions are `(i32 ctx) → i64` (requirement 5, §11); §10's feature baseline; §11's V8 verification note (re-checked on wasm32 with the new Phase 1 task); §13 gate 1 (pointers above 2 GiB instead of memory64 glue); §15 fallback wording; §16 boot (no `address` key, Number page counts); §17 Xbox numbers; §24 flags (no `-m64`, `INITIAL_MEMORY=4294901760`), the absent-flags table, and WASM_JIT.md J17's table-index question settled; §28 rows; WASM_JIT.md updated to match.
+- **§7: virtual cores.** One global run queue livelocks when a high-priority thread spins on a lower-priority thread that would run on another core. The scheduler now models the npdm's cores, one run queue each, with ideal core plus affinity mask, run in fixed-order rounds. `Guest_Thread` gains `ideal_core`, `affinity_mask`, `current_core` and a CREATED state; `scheduler_run_slice` is the driver's entry point.
+- **§7: virtual time and pacing defined.** Time advances per round, not as a sum of every thread's budget (which ran guest time up to 3× fast). The counter formula WASM_JIT.md J7.7 cites now exists: `cycles × 8 / 425` ticks, `cycles × 50 / 51` ns. Idle skipping, the wall-clock throttle (at most one frame ahead), slow-host behavior and deterministic mode are specified. The cycles-per-instruction ratio is an open question for Phase 2.
+- **§6: CPU worker driver.** v3.28's blocking `Atomics.wait` with a 100ms timeout delivered no messages: a timeout ends the wait, not the task. The worker now runs ~4ms slices, yields through `MessageChannel`, and idles in `Atomics.waitAsync` on a wake word in a new control region. Frame backpressure becomes a guest-thread wait in the buffer queue, and the GPU stores the publish value it read into consume (an increment re-presented a frame after every skip).
+- **§13 gate 3: two modules in one memory.** Separately linked Emscripten modules put their static data, stack and heap at the same addresses; the renderer either becomes relocatable inside a layout-reserved range or runs as an Emscripten pthread of the core program. §13's claim that the Playwright matrix asserts WebGPU-in-worker per engine is corrected: it runs Chromium only.
+- **§18: input gains motion and touch, and a new output region** carries rumble and player LEDs back to the main thread. §12's hid writer fills and drains them.
+- **§15:** persistent storage requested before the first save write; game files reach the CPU Worker as `File[]`, read through `FileReaderSync`; the save-state contract (plain-data service state, versioned, caches rebuilt) binds now, ahead of Phase 7.
+- **§16:** `load-game` carries `File[]`; one instance per origin through a Web Lock; a browser-requirements table, its versions recorded from vendor notes and unverified until the e2e matrix asserts them.
+- **§17/§28: no native JIT on ARM64.** The JIT column becomes "CPU execution"; the iOS entitlement section is replaced (the PWA is the fast iOS path); the `dynamic-codesigning` risk row becomes an iOS Safari memory row.
+- **Contradictions fixed:** §8's header comment (check events, not block boundaries); §5's "Tier 1 does the full two-load walk every access" (tier 1 has a one-entry TLB, §10 requirement 2); §7/§12 `tpidrro_el0` (armed once at creation, not per switch); §24's string options (`CACHE STRING`, not `option()`) and `GPU_BACKEND` (no `metal|d3d12`); §24's export list synced with `CMakeLists.txt`; `PTHREAD_POOL_SIZE=8` dropped, since the core creates no threads; §3's `Result` enum synced with `result.h`; §2 (`svc_memory.{h,c}`, `emulator.{h,c}`, `result.h`, planned docs marked); §23's packed attribute (the struct is naturally 24 bytes); §27 renamed "Reference Material", leaving §26 with the reference-implementations table.
+- **§5 proposal, not adopted:** 32-bit PTEs holding guest-physical frames, for header review.
+- **§25:** new Phase 1 task for the wasm32 memory model; the Phase 1 input item, Phase 2 scheduler, Phase 3 renderer spike, Phase 6 saves, Phase 7 save states and Phase 8 iOS items updated.
+- **Docs only.** No code or header changes. Until the Phase 1 wasm32 task lands, the tree still builds wasm64 (§24 pending note), and `cpu.h`'s comment changes with the WASM_JIT.md J15 header review.
 
 ### Changelog v3.27 → v3.28 (summary)
 
