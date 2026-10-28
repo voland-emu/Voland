@@ -17,7 +17,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 7. [Guest Thread Scheduling](#7-guest-thread-scheduling)
 8. [CPU Backend Interface](#8-cpu-backend-interface)
 9. [No-Op Backend](#9-no-op-backend)
-10. [Ballistic Integration Plan](#10-ballistic-integration-plan)
+10. [JIT Backends](#10-jit-backends)
 11. [JIT Compilation Pipeline](#11-jit-compilation-pipeline)
 12. [HLE Service Layer](#12-hle-service-layer)
 13. [GPU Architecture](#13-gpu-architecture)
@@ -55,7 +55,7 @@ A Nintendo Switch 1 (and eventually Switch 2) emulator targeting all major platf
 
 - WASM as a primary JIT emission target, not a port
 - WebGPU renderer built from the start, not retrofitted
-- CPU backend is an abstract vtable, the recompiler (Ballistic) slots in when ready, interpreter used until then
+- CPU backend is an abstract vtable, the recompiler (Voland's own `wasm_jit` on web, optionally Ballistic on desktop) slots in when ready, interpreter used until then
 - All platform layers are thin, the C core does the work, platforms provide surfaces
 - Web version is not a second-class citizen, it is the primary distribution mechanism
 
@@ -69,15 +69,16 @@ Everything else in this document is downstream of these. They are stated up fron
 
 ### Recompiler dependency
 
-The primary recompiler target is **Ballistic** (github.com/pound-emu/ballistic), a C rewrite of dynarmic currently in early development. The architecture is explicitly designed so that Ballistic is a replaceable component behind an abstract interface. The project is fully buildable and testable with:
+The primary recompiler target is **`wasm_jit`**, Voland's own ARM64→WASM translator (§10, [`docs/WASM_JIT.md`](WASM_JIT.md), Phase 5). **Ballistic** (github.com/pound-emu/ballistic) is an optional desktop x86 backend, consumed unmodified. Every recompiler is a replaceable component behind an abstract interface. The project is fully buildable and testable with:
 
 - **No-op backend** (default), for building and testing everything except actual game execution
 - **Interpreter backend**, slow but correct, unblocks homebrew and HLE testing
-- **Ballistic backend**, primary target, wired in when instruction coverage is sufficient
+- **wasm_jit backend**, primary target on web, wired in when instruction coverage is sufficient
+- **Ballistic backend**, optional on desktop, wired in when upstream coverage is sufficient
 
-dynarmic is no longer an interim target. Ballistic-x86 replaces it on desktop when coverage suffices; the interpreter covers the gap. This removes the only C++ dependency from core.
+dynarmic is no longer an interim target; the interpreter covers the gap on desktop. This removes the only C++ dependency from core.
 
-**Nothing in the project except playable performance depends on Ballistic being complete.**
+**Nothing in the project except playable performance depends on any recompiler being complete.**
 
 ---
 
@@ -170,6 +171,8 @@ The loader subsystem (`core/hle/loader/`) accepts already-decrypted NCA files an
 
 If a user attempts to load an encrypted NSP or XCI file, Voland reports an error directing them to decrypt using separate tools first.
 
+The CPU backends (`core/cpu/`) implement the A57's instruction set, including the Cryptographic Extension's AES, SHA and PMULL instructions (v3.28; WASM_JIT.md J17 question 1). That is not decryption code. When a game executes AESD, the game's own code is processing its own data, as on hardware, just as its save crypto runs inside the emulator and Voland never does it (§20). Voland's host code never uses these instructions and never supplies a key. Leaving them undefined would stop nothing, since guest code can compute AES in software on any CPU; it would only break the titles that use them. QEMU, the posture model above, implements the same instructions. The review tripwire's standing exception for them is listed in CONTRIBUTING.md.
+
 ---
 
 ## 2. Repository Structure
@@ -185,18 +188,23 @@ voland/
     DUMP.md                  # separate-tools guide (keys + decryption happen there, never in Voland)
     SAVE_FORMAT.md
     TRACE_FORMAT.md
-    WASM_BACKEND.md
+    WASM_JIT.md              # wasm_jit specification: ARM64→WASM translator (§10–11)
     GPU_COMMAND_STREAM.md    # versioned CPU→GPU worker command format
 
   core/                      # C11, platform-agnostic
     cpu/
       cpu.h                  # abstract CPU backend interface (§8)
       cpu.c                  # backend wiring
-      dispatch.{h,c}         # JIT block dispatcher loop (§11)
+      a64/                   # shared by the interpreter and wasm_jit (WASM_JIT.md J3, J5)
+        decoder.{h,c}        #   generated A64 decoder (Phase 2)
+        insn.h               #   predecoded record + per-form metadata: the IR
+        state.h              #   per-thread A64_State: register file, V regs, JIT control block
+      dispatch.{h,c}         # block cache, regions, table slots, invalidation; run() loop (§11)
       backends/
         noop/                # default, always builds
-        interpreter/         # ARM64 interpreter
-        ballistic/           # Ballistic integration (x86 + wasm)
+        interpreter/         # ARM64 interpreter (predecoded form from Phase 5)
+        wasm_jit/            # Voland's ARM64→WASM translator (§10, Phase 5, web build only)
+        ballistic/           # optional Ballistic x86 integration (§10)
     hle/
       hle.h
       hle.c                  # syscall dispatch table
@@ -302,7 +310,7 @@ voland/
                              # save-sync backend, TURN pairing. User-hosted only;
                              # Voland operates no instance. User-owned data only.
 
-  recompiler/                # Ballistic git submodule
+  recompiler/                # Ballistic git submodule (unmodified; optional desktop backend, §10)
 
   tests/
     cpu/ hle/ gpu/ games/
@@ -322,7 +330,7 @@ Every deferral carries a **conformance contract** that normalizes platform varia
 
 Known leaks, pre-rejected: **SIMD semantics** — NEON maps to platform SIMD only where bit-exact; denormal/NaN differences leak into game physics as per-platform divergence, so core owns vector semantics and platform SIMD is a proven-exact optimization, never a behavior deferral. **Timing** — platform clocks and callback cadences vary; guest time is virtual (§7), wall-clock coupled only at the pacing layer. **Platform auto-backup** (iCloud/Android app-data backup) — opaque conflict semantics can corrupt saves behind the emulator; the §15 explicit backends are the only sync, and native builds exclude save directories from OS auto-backup.
 
-The rule is falsifiable: per-platform golden-image and interpreter-vs-JIT differential runs (voland-cli, §17) surface any leaked deferral as cross-platform divergence in CI.
+The rule is falsifiable: per-platform golden-image and interpreter-vs-JIT differential runs (voland-cli, §17; the web harness for `wasm_jit`, WASM_JIT.md J12) surface any leaked deferral as cross-platform divergence in CI.
 
 Corollary cost, paid knowingly: core targets the **intersection** of platforms — written against the most constrained one (web), native follows for uniformity. See §5 for the largest bill (native fastmem) and its escape hatch.
 
@@ -520,7 +528,7 @@ Two dependent loads plus masking. The JIT emits this sequence (or a call to a pe
 
 A second later optimization: because Voland controls physical layout, the main heap can usually be mapped contiguously, letting the JIT skip translation for accesses statically provable to land in it. Noted here so nobody designs it in early — it is an optimization on top of a correct softmmu, not a substitute for one.
 
-The intersection-targeting cost (§3), named: **native builds forgo host-`mmap` fastmem** — the page-aliasing scheme that gives mature native emulators near-free guest access — so that one memory model and one JIT lowering run everywhere. A native fastmem backend for vmm is the escape hatch: guest-invisible by definition if correct (it implements the same mapping), but it bifurcates Ballistic's memory-access lowering into two modes, so it is gated exactly like Tier 2 Vulkan and per-core workers — on profiling showing the softmmu is the native bottleneck, and not before Phase 8.
+The intersection-targeting cost (§3), named: **native builds forgo host-`mmap` fastmem** — the page-aliasing scheme that gives mature native emulators near-free guest access — so that one memory model and one JIT lowering run everywhere. A native fastmem backend for vmm is the escape hatch: guest-invisible by definition if correct (it implements the same mapping), but it bifurcates the JIT's memory-access lowering into two modes, so it is gated exactly like Tier 2 Vulkan and per-core workers — on profiling showing the softmmu is the native bottleneck, and not before Phase 8.
 
 ### One MMU, three consumers
 
@@ -585,7 +593,12 @@ All guest addresses crossing any interface in this codebase are **virtual** unle
 
 ### Self-modifying code
 
-`vmm_reprotect` and explicit `invalidate_cache` calls (§8) interact: the kernel write-protects pages containing translated code; a write fault on such a page invalidates the affected translations and restores write permission. Standard emulator SMC handling; the mechanism lives in `dispatch.c` (§11).
+Translations are invalidated by the events that architecturally signal a code change, not by write-protecting translated pages (v3.28; WASM_JIT.md J8.5):
+
+- **Mapping changes.** `vmm_map`, `vmm_unmap` and `vmm_reprotect` notify a mutation observer, which the emulator wires to the CPU backend's `invalidate_cache` (§8). Every unmapped, remapped or reprotected range drops its translations. The observer is a `vmm.h` addition, reviewed with `wasm_jit`'s headers.
+- **Guest cache maintenance.** Guest code that writes code must, architecturally, issue `IC IVAU` and then a context-synchronizing event (ISB) before executing what it wrote. `IC IVAU` queues the line's guest-*physical* page; the next ISB (or the next exit) invalidates translations made from that page. A write through a CodeMemory RW alias therefore invalidates code translated from its RX alias.
+
+The v3.27 plan, write-protecting translated pages and catching the fault, is rejected. `QueryMemory` reports PTE permission bits, so a W bit cleared by the JIT would be guest-visible (§3). And Horizon enforces W^X for applications, so code is never written at its executable address anyway. A software PTE bit, `VMM_PTE_WRITE_WATCH`, is specified as the fallback for code that skips `IC IVAU`; it is not built. The mechanism lives in `dispatch.c` (§11).
 
 ---
 
@@ -618,7 +631,7 @@ flowchart TB
         SHC["Shader decompilation +<br/>pipeline cache (§13)"]
     end
 
-    COMPW["Compiler Worker (Dedicated)<br/>WebAssembly.compile + byte cache<br/>(same agent cluster as CPU Worker:<br/>Module transfer works, §11)"]
+    COMPW["Compiler Worker (Dedicated)<br/>WebAssembly.compile only, stateless<br/>(same agent cluster as CPU Worker:<br/>Module transfer works, §11)"]
 
     AWP["AudioWorkletProcessor<br/>(audio thread; reads audio<br/>ring directly, §14)"]
 
@@ -689,7 +702,7 @@ Rationale:
 
 - Correctness first. Green threading makes the entire HLE layer single-threaded: no locks in any service, no memory-ordering bugs in kernel objects.
 - Exclusive monitors (LDAXR/STLXR) become trivially correct: a per-thread monitor flag cleared on every context switch. Nothing truly runs concurrently, so no host atomics are needed for guest atomics.
-  **Starvation guard** — budget expiry landing between LDAXR and STLXR clears the monitor, fails the store, and restarts the sequence; repeated unlucky preemption is a livelock. Three layers: (1) block/region formation **never splits an exclusive pair** — canonical sequences are short and straight-line, and budget checks fire only at block entry, so the JIT cannot preempt inside the window by construction; (2) the interpreter yields only at monitor-clear safe points, with a small instruction cap so a guest that takes a monitor and never stores can't hold the scheduler; (3) scheduler backstop: a per-thread consecutive-STLXR-failure counter grants an uninterrupted grace window after N failures, converting pathological interleavings into bounded delay.
+  **Starvation guard** — budget expiry landing between LDAXR and STLXR clears the monitor, fails the store, and restarts the sequence; repeated unlucky preemption is a livelock. Three layers: (1) **budget check events (see "Bounded execution" below) are skipped while the exclusive monitor is open**, so preemption never lands inside the window, in any backend and for any region shape (v3.28: replaces "region formation never splits an exclusive pair", which bound only the JIT and only for straight-line pairs; compare-and-swap loops branch inside the window); (2) a grace cap: once the budget is `EXCLUSIVE_GRACE_CYCLES` past exhaustion with the monitor still open, the next check event preempts anyway and clears it, so a guest that takes a monitor and never stores can't hold the scheduler. One definition serves the interpreter and the JIT (WASM_JIT.md J7.6); (3) scheduler backstop: a per-thread consecutive-STLXR-failure counter grants an uninterrupted grace window after N failures, converting pathological interleavings into bounded delay.
 - Per-core workers are an **architecture fork, priced here so the Phase 8 gate is honest.** Invariants that currently hold by single-thread construction and are demolished: JIT emits real `atomic.rmw`/`cmpxchg` for guest exclusives; every kernel object, the handle table, and scheduler queues need locking; §3's arenas are single-threaded; virtual time becomes a contended counter; the GPU command ring's SPSC breaks (multi-producer nvdrv decode); the §5 borrow guarantee is voided; the hid writer's sampling-number protocol goes from decorative to load-bearing; §11's block cache and funcref table are per-worker (wasm tables cannot cross threads → per-worker instantiation of shared modules); and — hardest — **vmm page tables vs concurrent inline JIT walks**: a walker races unmap into torn PTEs, and the two-load fast path cannot afford a lock, so mutation needs a quiesce protocol or RCU-style epochs.
   **The named intermediate, designed before the full fork is ever attempted:** execution workers + one kernel worker. Guest CPU execution parallelizes; SVCs marshal to the kernel worker; **HLE stays single-threaded** (the largest demolition item avoided). Page-table mutation quiesces at the yield points that already exist — budget checks at block entry are safe points: unmap requests all execution workers exit at the next block boundary, applies, resumes. Cost: real atomics, the quiesce protocol, SVC round-trip latency. Evidence gate unchanged: profiling must show single-worker guest-CPU throughput is the bottleneck.
 
@@ -707,7 +720,9 @@ typedef enum CPU_ExitReason {
 } CPU_ExitReason;
 ```
 
-Every backend must be able to stop at translation-block boundaries when the budget expires. For the JIT this is a per-block cycle-counter decrement and check at block entry; this is where Ballistic's planned `OPCODE_YIELD` maps. `run(entry_point)`-until-done does not exist in the interface.
+Every backend must be able to stop when the budget expires. **Preemption happens only at check events** (v3.28): when a taken backward direct branch (target at or below its own address) or an indirect branch (BR, BLR, RET) retires with the budget exhausted, the thread stops with its PC at the branch target. Every backend counts cycles as retired guest instructions, one each.
+
+Check events are properties of the guest program. Block and region boundaries are not: they depend on what has been compiled, and compiles finish on wall-clock time. So the interpreter and the JIT preempt at identical points whatever is compiled, which keeps runs reproducible and interpreter-vs-JIT differentials exact (§3). Every infinite path passes check events infinitely often, because a path of forward-only branches strictly increases the PC; so the budget's overshoot is bounded. For the JIT this is a per-block decrement of a local plus a test on backward edges and indirect exits (`wasm_jit` requirement 1, §10; WASM_JIT.md J7.6). YIELD, WFE and WFI also end the thread's slice: spin-wait loops use them, so this lets the awaited thread run sooner. `run(entry_point)`-until-done does not exist in the interface.
 
 ### Scheduler
 
@@ -731,7 +746,7 @@ void scheduler_tick(Scheduler* sched);  // the CPU worker's main loop body
 
 - `CYCLES_ELAPSED` → re-enqueue; advance virtual time.
 - `SVC` → the SVC handler already ran inside `run()`. Blocking SVCs (`WaitSynchronization`, `SleepThread`, `ArbitrateLock`) marked the thread WAITING/SLEEPING and registered it on a wait object or timer; the scheduler simply doesn't re-enqueue it. Non-blocking SVCs → re-enqueue.
-- `FAULT` → SMC invalidation path (§5) if it's a write to protected code, else guest crash handling.
+- `FAULT` → guest crash handling. Self-modifying code never arrives as a fault: invalidation is driven by mapping changes and `IC IVAU` (§5).
 
 Threads become RUNNABLE again when another thread signals the wait object or the virtual timer fires.
 
@@ -756,7 +771,8 @@ flowchart TB
     subgraph BACKENDS["CPU_Backend (vtable)"]
         NOOP["CPU_BACKEND_NOOP<br/>(default, always builds)"]
         INT["CPU_BACKEND_INTERPRETER<br/>(slow but correct)"]
-        BAL["CPU_BACKEND_BALLISTIC<br/>(primary target;<br/>x86 + wasm emitters)"]
+        WJIT["CPU_BACKEND_WASM_JIT<br/>(primary target, web;<br/>Phase 5, §10)"]
+        BAL["CPU_BACKEND_BALLISTIC<br/>(optional, desktop x86)"]
     end
 
     subgraph CB["Callbacks (set by emulator)"]
@@ -785,7 +801,7 @@ typedef struct CPU_State   CPU_State;
 typedef struct CPU_Backend CPU_Backend;
 
 // Common architectural state, embedded by every backend. Layout is fixed:
-// the JIT's linear-memory register file (Ballistic §10) already pins it.
+// wasm_jit's emitted code addresses it by offset (A64_State, WASM_JIT.md J5.1).
 typedef struct CPU_Register_File {
   uint64_t x[31];   // X0–X30; index 31 does not exist (see get_reg note)
   uint64_t sp;
@@ -855,14 +871,15 @@ typedef struct CPU_Backend {
   void (*set_undefined_handler)(CPU_State* state, CPU_Undefined_Handler handler);
   void (*set_breakpoint_handler)(CPU_State* state, CPU_Breakpoint_Handler handler);
 
-  const char* name;          // "noop", "interpreter", "ballistic"
+  const char* name;          // "noop", "interpreter", "wasm_jit", "ballistic"
   const char* version;
   bool        supports_jit;
 } CPU_Backend;
 
 extern const CPU_Backend CPU_BACKEND_NOOP;
 extern const CPU_Backend CPU_BACKEND_INTERPRETER;
-extern const CPU_Backend CPU_BACKEND_BALLISTIC; // only if -DCPU_BACKEND=ballistic
+extern const CPU_Backend CPU_BACKEND_WASM_JIT;  // web build only; Phase 5 (§10)
+extern const CPU_Backend CPU_BACKEND_BALLISTIC; // optional desktop; only if -DCPU_BACKEND=ballistic
 
 const CPU_Backend* cpu_get_active_backend(void);
 ```
@@ -887,7 +904,7 @@ Changes from v2: `create` takes `VMM_Context*` instead of `(guest_ram, ram_size)
 
 The no-op backend is the default. It builds on all platforms with zero dependencies. It maintains register state so HLE services can read and write registers, and it honors the exit-reason contract so the scheduler can be developed against it. It does not execute any ARM instructions.
 
-**Every subsystem except actual game execution can be built and tested with the no-op backend** — the frontend, storage, worker architecture, Service Worker, scheduler, and HLE scaffolding. This decouples Voland's development from Ballistic's development entirely.
+**Every subsystem except actual game execution can be built and tested with the no-op backend** — the frontend, storage, worker architecture, Service Worker, scheduler, and HLE scaffolding. This decouples Voland's development from any recompiler's development entirely.
 
 ```c
 // core/cpu/backends/noop/noop.c (abridged; accessor boilerplate as in v2)
@@ -924,11 +941,22 @@ Tests can drive HLE by setting registers and invoking the SVC handler directly �
 
 ---
 
-## 10. Ballistic Integration Plan
+## 10. JIT Backends
 
-### What Ballistic is
+### Decision (v3.28)
 
-Ballistic ([github.com/pound-emu/ballistic](https://github.com/pound-emu/ballistic)) is a C rewrite of the dynarmic ARM recompiler — a **separate upstream project**, consumed as a submodule, never modified in-tree. Working barebones x86 backend exists in `src/backend/x86/`. **The WASM backend is paused upstream: the maintainer has asked downstream consumers to hold off while the IR API stabilizes.** Voland writes no code against Ballistic's IR — no vendored headers, no homegrown WASM emitter, no fork — until upstream declares it stable. The x86 backend is not paused and remains the desktop JIT path.
+**The web JIT is Voland's own ARM64→WASM translator, `wasm_jit`** (`core/cpu/backends/wasm_jit/`, Phase 5), specified in [`docs/WASM_JIT.md`](WASM_JIT.md). **Ballistic is an optional desktop x86 backend, consumed unmodified.** Neither is a dependency of anything except playable performance. The interpreter remains the execution path on every platform until a JIT reaches coverage.
+
+Why the v3.27 plan ("wait for Ballistic-WASM") was retired, as observed in the Ballistic repository in October 2026:
+
+- **The working backend does not use the IR.** Ballistic's tier-1 x86 compiler decodes ARM64 and emits x86 from per-instruction templates with a sliding-window peephole; lowering happens inside its x86 assembler. The IR in its design doc is not on any executing path, so there is no portable IR for a WASM backend to target.
+- **The IR-based compiler was removed, not paused.** The tier-2/IR code was deleted upstream on 2026-06-19, with the author's note that it "will need to be rewritten regardless". What v3.27 waited on, "the IR API stabilizes", gates nothing that exists.
+- **There is no WASM work upstream**, and the design-input channel this section relied on (the Pound Discord) no longer reaches the maintainer. GitHub issues on `pound-emu/ballistic` are the remaining channel.
+- **Ballistic's memory interface is fast-path oriented.** Hosts describe guest regions that map linearly to host memory, and the JIT inlines direct loads against them. That is the opposite of §5's rule that every access walks the softmmu. It may be workable for an x86 integration (open question below), but it is not a shape the web path can adopt.
+
+**Forking Ballistic was considered and rejected.** It is legally possible (both projects are GPLv2), but the IR-based Ballistic never existed as a working compiler: the emitter and tier-2 worker were a few hundred lines when removed. "Restoring" it would mean writing the IR inside someone else's codebase and carrying that divergence against an active upstream. Writing the translator against Voland's own §5, §7 and §11 contracts is less work and has no merge cost.
+
+**The IR is the predecoded interpreter's record format.** One generated A64 decoder (Phase 2) produces fixed-size records carrying static per-form metadata: registers and flags read and written, memory access, and how the instruction ends a block. The predecoded interpreter executes the records; `wasm_jit` groups them into regions and lowers them to WASM. There is no SSA or micro-op layer, because the browser's WASM tiers (Liftoff→TurboFan, BBQ→OMG, baseline→Ion) already do register allocation, CSE, DCE, constant folding and instruction selection. What the browser cannot know is ARM semantics. So `wasm_jit`'s own optimizations are the ARM-aware ones: guest registers cached in WASM locals for a whole region, lazy NZCV, and a per-region one-entry TLB in front of the §5 walk. All three need only the per-instruction facts the records carry. Sharing the records also means the JIT can never decode differently from the interpreter. Rationale and rejected alternatives: WASM_JIT.md J3.
 
 ### Backend matrix
 
@@ -936,126 +964,205 @@ Ballistic ([github.com/pound-emu/ballistic](https://github.com/pound-emu/ballist
 flowchart LR
     NOOP["noop<br/>(default, always builds)"]
     INT["interpreter<br/>(unblocks homebrew)"]
-    BX86["ballistic-x86<br/>(desktop JIT)"]
-    BWASM["ballistic-wasm<br/>(browser JIT,<br/>primary target)"]
+    PRE["predecoded interpreter<br/>(all platforms)"]
+    WJIT["wasm_jit<br/>(browser JIT,<br/>primary target)"]
+    BX86["ballistic-x86<br/>(optional desktop JIT,<br/>unmodified upstream)"]
 
     NOOP -->|"Phase 2"| INT
-    INT -->|"Phase 5, desktop"| BX86
-    INT -->|"Phase 5, web"| BWASM
+    INT -->|"Phase 5"| PRE
+    PRE -->|"Phase 5, web"| WJIT
+    PRE -.->|"when upstream coverage suffices"| BX86
 
-    style BWASM fill:#e8f4ff,stroke:#0066cc
+    style WJIT fill:#e8f4ff,stroke:#0066cc
 ```
 
-Backend selection inside Ballistic is compile-time (`-DBALLISTIC_BACKEND=wasm|x86`), per its D-cache rules — no function-pointer dispatch in the translation loop.
+### Desktop: the WASM path is the web build, not an embedded engine
 
-### Contract items Voland requires from Ballistic
+Desktop users who want `wasm_jit` run the web build in a desktop browser: `wasm_jit` emits WASM, and the browser's engine compiles it to native code. That is the supported "ARM → WASM → native" path on desktop, and it costs nothing beyond the web build itself.
 
-These are integration requirements this design imposes on the Ballistic WASM backend. With the WASM backend paused upstream, they are filed now as **design input** (Pound Discord) — constraints from a downstream consumer, stated while the IR is still malleable and changes are cheap. They become a hard gate only when upstream resumes WASM work; Voland builds nothing against them before then. Several diverge from Ballistic's current draft doc:
+**A native build (voland-cli, the Qt app) does not embed V8, JSC or any other WASM engine to run `wasm_jit` output.** Region modules import the core's shared memory and the core's `funcref` table (requirements 5 and 7). In a native build the core is native code, so neither exists. Bridging them would need function imports (banned by requirement 5) plus a per-engine shim exposing the native linear-memory mapping as a WASM memory. V8 is also a large C++ build dependency, and JSC exposes WASM only through a JS context. Embedding an engine to run the *whole* core module instead is just the web build in a different shell, with more packaging.
 
-1. **Bounded execution / yield points.** Emitted code decrements a cycle counter per block and exits when it reaches zero (`OPCODE_YIELD` semantics). Required by §7.
-2. **MMU-aware loads/stores.** Emitted guest memory accesses perform the §5 page-table walk (inline or via a same-module helper). `iN.load offset=0` against raw guest addresses is not a valid emission.
-3. **Host-provided layout constants.** Register-file base, page-table L1 base, and guest-RAM base are configuration passed at compiler init — not constants Ballistic picks. Collision avoidance is the host's job via §4 layout.
-4. **Exit-code ABI, no traps for control flow.** Block functions return the next guest PC (i64), with exit reason in a fixed linear-memory mailbox slot. `OPCODE_TRAP` writes its reason to the mailbox and *returns*; it does not emit `unreachable` (a WASM trap unwinds through the JS boundary as a RuntimeError — orders of magnitude more expensive than a return, for no benefit).
-5. **No function imports; two non-function imports.** Region modules import (a) the shared memory and (b) the core module's growable `funcref` table. Register file and mailbox live in linear memory; SVC/fault/budget exits go through the return path. The table import is what makes the C dispatcher's `call_indirect` reach region block functions without a JS bounce per inter-region jump (§11). This changes Ballistic's module envelope: table import section, typed `() → i64` entries. (Resolves the v2 contradiction where §4 instantiated modules with `env.read_reg/write_reg/call_hle` imports while §7b claimed no imports — function imports stay banned.)
-6. **Region-granularity modules**, not per-block modules. See §11.
+Native builds therefore run the predecoded interpreter, plus ballistic-x86 once its coverage suffices. A Voland-owned native emitter is not planned. Revisit in Phase 8 only if profiling shows a desktop-browser gap that matters, under the same gate as native fastmem (§5).
+
+**Testing consequence:** `wasm_jit`'s interpreter-vs-JIT differential runs execute the core module under Node (V8, shared memory64) or the existing headless-Chrome harness, not under voland-cli. The translator itself is plain C and builds natively, so its emission tests run under ctest (WASM_JIT.md J12).
+
+### wasm_jit requirements
+
+These were filed against Ballistic as design input in v3.27. They are now Voland's own requirements on `wasm_jit`, refined where WASM_JIT.md settled the details, plus one new requirement (8):
+
+1. **Bounded execution.** Emitted code decrements a cycle budget and exits when it is exhausted, at the deterministic check events of §7 (backward and indirect branches), so preemption never depends on what happens to be compiled. Required by §7.
+2. **MMU-aware loads and stores.** Every emitted guest memory access performs the §5 page-table walk, behind a per-region one-entry TLB held in locals, with the walk itself in a module-local helper. `iN.load offset=0` against raw guest addresses is not a valid emission.
+3. **Host-provided constants.** The page-table L1 base comes from `layout_get()`, and context field offsets and helper table indices from the core build. None are constants the translator picks. The session-specific ones are relocated when a module is assembled, so cached bodies carry none (WASM_JIT.md J5.5).
+4. **Exit-code ABI, no traps for control flow.** Region functions return the next guest PC (i64), with the exit reason in the thread context's control block, the "mailbox". Exits write their reason and *return*. They never emit `unreachable`: a WASM trap unwinds through the JS boundary as a RuntimeError, which is orders of magnitude more expensive than a return, for no benefit.
+5. **No function imports; two non-function imports.** Region modules import (a) the shared memory and (b) the core module's `funcref` table. Region functions have the type `(i64 ctx) → i64`: the parameter is the guest thread's `A64_State` (register file, V registers, control block), so one translation serves every thread of the process. The table import lets the C dispatcher's `call_indirect` reach regions, and lets regions reach core C helpers the same way, all without JS (§11).
+6. **Region-granularity modules**, batched: each module carries several region functions, one per region. See §11.
 7. **Shared, memory64 memory type.** Emitted modules import a shared memory with the memory64 flag and matching limits, or instantiation throws.
+8. **Position-independent code** (new in v3.28). Emitted code computes every guest address from a page base the dispatcher supplies and embeds no absolute GVA. Without this, §11's GVA-free content-hash cache key would serve wrong branch targets once ASLR moves code.
+
+### Design summary
+
+WASM_JIT.md is the specification. These are its decisions that shape the rest of this document:
+
+- **Regions** (§11): one WASM function each, a `loop` around a `br_table` with forward edges as plain `br` and back edges through the selector. A region has multiple entries (BL return sites), is formed only for hot code, and is specialized on FPCR's mode bits.
+- **Coverage is incremental.** An instruction the translator does not handle yet ends its region and is interpreted. Per-form fallback counters decide what to translate next.
+- **Determinism (§7).** The interpreter and `wasm_jit` produce identical state, cycle counts and preemption points regardless of compile timing. This is what makes interpreter-vs-JIT differential testing (§3) meaningful.
+- **Exact FP (§3).** NaN results are fixed up to ARM's rules. FMA is emulated exactly: baseline WASM has no fused operation, and relaxed SIMD's may not fuse. Non-default rounding modes fall back to the interpreter.
+- **Invalidation (§5, §11)** follows mapping changes (a vmm observer) and guest `IC IVAU` + ISB, not write-protection.
+- **Translation cache (§11, §15):** stores region function bodies keyed by content. Warm starts assemble modules from cached bodies without translating.
+
+### Carried forward from the 2026 WASM backend draft
+
+Voland's maintainer wrote a tier-1 WASM backend design for Ballistic (Round 4, July 2026) before upstream dropped the IR. It is Voland's own work, so it is reused directly rather than under the rule-2 constraint. Its IR coupling is gone: its input is now decoded ARM64 records, not `bal_ir_block_t`. Carried into WASM_JIT.md: the three-layer split (assembler, module builder, translator), the hot-path emission contract, all-`i64` locals with width as a property of the operation, 5-byte padded-LEB size patching, branch-free ARM division, alignment hints, the bitfield-move lowering (the draft's question Q-B), the stated locals cap, layered tests, and the bisectable landing order.
+
+**Superseded by Voland's contracts:**
+
+| Draft decision | Replaced by | Why |
+|---|---|---|
+| Guest address = linear-memory offset; `iN.load offset=0` on the guest address | Requirement 2: every access walks the §5 page table | No GVA identity exists (§1, load-bearing decision 2) |
+| Fixed `BAL_REGFILE_BASE` above a 4GB guest window | Requirement 3: context offsets from the core build, layout from `layout_get()` | Collision avoidance is the layout's job (§4) |
+| One module per block | Requirement 6: batched region modules | One `WebAssembly.compile` per block, plus a JS bounce per inter-block jump |
+| Signature `() → ()`, next PC stored to a slot | Requirements 4 and 5: `(i64 ctx) → i64` returns the next PC | The draft's objection, that cap-terminated blocks fall off the end with an empty stack, goes away: every region exit goes through one epilogue that returns the PC |
+| `OPCODE_TRAP` → store reason, `unreachable` (draft Q-A: not resumable) | Requirement 4: write the mailbox, then `return` | Return-based exits make every fault resumable without a function import. The cost, writing back cached registers on a fault exit, is paid once, in a shared epilogue, and faults are precise (WASM_JIT.md J7.3). |
+| Memory-only import | Requirement 5: memory **and** the core's `funcref` table | `call_indirect` between dispatcher, regions and helpers without JS |
+| Compiler *Shared* Worker | Dedicated Compiler Worker (§11) | SharedWorkers are a separate agent cluster and cannot hand Modules back |
+| Cache key `(guest_address, ir_build_id)` | Content-hash key over position-independent bodies (§11) | GVAs are unstable under ASLR and title updates |
+
+### Engine features beyond baseline WASM
+
+Summary; details and status are in WASM_JIT.md J11. The baseline is WebAssembly 3.0 with memory64 and threads, which every browser Voland supports already ships.
+
+- **Branch hinting** is adopted in tier 1. Engines without support ignore the section, so it has no cache-key impact.
+- **Wide arithmetic** is feature-detected at boot for SMULH/UMULH and the carry and overflow flags, and its bit joins the §11 cache key.
+- **Relaxed SIMD** is excluded for anything ARM defines exactly: `relaxed_madd` may or may not fuse, depending on the host.
+- **Tail calls** (WASM 3.0) are not used in tier 1. They are the mechanism for tier-2 linking between regions.
+- **JSPI** is not needed: nothing blocks inside WASM (§7).
+- The **JIT interface proposal** is a watch item.
+
+### Ideas inherited from Ballistic
+
+Ideas only. Hard rule 2 applies to Ballistic exactly as to any emulator: read for behavior, reimplement, never copy. Inherited:
+
+- **Differential fuzzing against Unicorn.** Random ARM64 instructions run through Voland's interpreter and through Unicorn from the same pre-state, and the post-states are compared. This is a native-only test harness that is never shipped (Unicorn is GPLv2). It checks the Phase 2 interpreter, and through it the decoder that `wasm_jit` shares. It generates vectors in the same encoding / pre-state / post-state form as the hand-written instruction tests.
+- **A decoder generated from ARM's machine-readable A64 specification.** Voland writes its own generator over ARM's data, not over Ballistic's tables. It lands with the Phase 2 interpreter and emits the record format `wasm_jit` consumes (WASM_JIT.md J3).
+- **A cheap tier 1 with peephole rewrites during emission.** A Voland tier 2 is gated on profiling, since the browser already tiers compiled WASM.
+- **Structured SSA, if a compiler IR is ever needed beyond the predecoded records.** Ballistic's IR design uses structured control flow (if/loop scopes, symmetric yields). WASM's control flow is also structured (`block`/`loop`/`if`), which fits far better than a flat basic-block IR. It stays in reserve and is not built speculatively.
+- **Cache-footprint discipline for C hot paths:** hoist loads past aliasing hazards in loops, 64-byte-align shared singletons, order struct fields largest-first, and pad explicitly. This applies to the vmm walk, the scheduler, the dispatcher and the register file; `A64_State`'s control block is one cache line for this reason.
+- **Behavior facts**, for example: treat `PACIASP`/`AUTIASP` as NOPs and strip X30's upper bits.
+
+Not inherited: direct host loads against host-mapped regions (contradicts §5); mapping ARM flags onto host CPU flags (WASM has no flags register, so NZCV is lazy); recovering guest state through exception handling (contradicts requirement 4); clang-only and Lua tooling (Voland builds with GCC, Clang/emcc and MSVC, §25).
+
+**Clean-room procedure:** `wasm_jit`'s interface headers and translation spec go through the normal header review before any implementation. Implementation works from that spec, not with Ballistic's source open alongside it.
+
+### Ballistic-x86 (optional desktop backend)
+
+- Consumed as the unmodified `recompiler/` submodule, against Ballistic's public `bal_*` API only: no vendored headers, no patches, no fork. Integration code lives in `core/cpu/backends/ballistic/`, which stays off-limits until the maintainer unlocks it (CLAUDE.md rule 10).
+- **Open question, resolved at integration:** how Voland answers Ballistic's region-description callback. One candidate is "never describe a region": every access goes through the translate callback, which is correct but slow. The other is "describe page-granular runs that vmm guarantees stable until the next `vmm_unmap` or reprotect, with JIT-cache invalidation on change". The second needs an invalidation hook upstream does not expose yet; §5's vmm mutation observer is the Voland side of it.
+- Nothing in the project depends on ballistic-x86 landing. If it never reaches coverage, desktop runs the predecoded interpreter, and the web build is the fast path on desktop too.
 
 ### Executable memory abstraction per platform
 
 ```c
 // Native (Linux/macOS/Android): mmap RW → mprotect RX (W^X)
 // Windows: VirtualAlloc / VirtualProtect
-// WASM: no executable memory; "commit" ships bytes to the host,
-//       which compiles them:
-void wasm_commit_executable(void* ctx, void* mem, size_t size) {
-  wasm_schedule_compile(ctx, mem, size); // → Compiler Worker (dedicated)
-}
+// WASM: no executable memory. wasm_jit assembles module bytes in the JIT
+//       emission buffer (§4); cpu.worker.ts pulls each finished batch and
+//       the Compiler Worker compiles it (§11, WASM_JIT.md J8.4).
 ```
 
 ### NEON ↔ WASM SIMD
 
-ARM NEON v8–v31 (128-bit) maps to WASM v128 (`vadd.i32→i32x4.add`, `vld1.32→v128.load`, etc). `-msimd128` is a required build flag (§24); without it vertex-heavy code drops ~4x. Out of Ballistic Tier 1 scope; noted for the build system and the eventual FP/SIMD tier.
+ARM V0–V31 (128-bit) are `v128` locals in `wasm_jit`. Lane operations map to WASM SIMD only where they are bit-exact (§3), for example `vadd.i32` → `i32x4.add` and `vld1.32` → `v128.load` through the softmmu; everything else is emulated or interpreted (WASM_JIT.md J7.8). `-msimd128` remains a required core build flag (§24): without it, the C side (interpreter, helpers) loses WASM SIMD, and vertex-heavy code drops by about 4x.
 
 ---
 
 ## 11. JIT Compilation Pipeline
 
+The mechanics below are summarized from [`docs/WASM_JIT.md`](WASM_JIT.md), which is the specification.
+
 ### Compilation unit: regions, not blocks
 
-One `WebAssembly.Module` per basic block does not scale: thousands of instantiations, per-module baseline-compile overhead, and — worst — no block chaining, so every block exit crosses back into the dispatcher. Voland compiles **regions**:
+One `WebAssembly.Module` per basic block does not scale: thousands of instantiations, per-module baseline-compile overhead, and, worst, no block chaining, so every block exit crosses back into the dispatcher. Voland compiles **regions** (WASM_JIT.md J4):
 
-- Start at a requested entry GVA. Follow direct branches, including both arms of conditionals, adding blocks to the region.
-- Stop growing at: indirect branch, `RET`, SVC, back-edge to an address outside the region, or a size cap (~64KB of emitted WASM).
-- Emit the region as **one module**: each block is a function, all registered in a module-local `funcref` table. Direct intra-region jumps are direct calls or structured branches; intra-region indirect targets go through `call_indirect` on the local table.
-- A block exit that leaves the region returns `(next_guest_pc, exit_reason)` to the dispatcher.
+- **Start** at a hot entry GVA; the predecoded interpreter counts block entries. Follow direct branches, including both arms of conditionals. A BL's fall-through joins the region as an extra **entry**, since control returns to it through RET; the callee is not followed.
+- **Stop growing** at: an indirect branch, SVC, BRK or undefined encoding, YIELD/WFE/WFI, MSR FPCR, an instruction the translator does not cover yet (it is interpreted instead), a debugger breakpoint, or a size cap (~64KB of emitted WASM).
+- **Emit each region as one function**, `(i64 ctx) → i64`. The body is a `loop` enclosing a `br_table` over the region's guest blocks, with the selector in an `i32` local. Blocks are laid out so that a forward edge is a plain `br`; only entries and back edges go through the `br_table`. Indirect branches leave the region.
+- **Why one function, not one function per block:** if blocks were functions and intra-region jumps were calls, a guest loop (`A → B → A`) would grow the WASM call stack on every iteration until it overflowed, and an overflow is a trap (§10 requirement 4). Structured branches keep the stack depth constant. They also keep guest registers in WASM locals across the whole region, so the register file in linear memory is touched only at entry and exit.
+- **Region exits** all go through one shared epilogue. It writes back every guest register the region writes, materializes NZCV, stores the PC and the budget, records the exit reason in the context's control block, and returns the PC (§10 requirement 4). Faults are precise: guest state is exactly as it was before the faulting instruction (WASM_JIT.md J7.3).
+- **Entries and overlap:** the block cache maps each entry GVA to `(slot, block index, page base)`. Regions may overlap in guest code, and invalidation drops every region that covers an affected range.
+- **Batching:** a module carries up to 16 region functions. The unit of translation and caching is the function body; the unit of compilation is the batch.
+- **Considered and rejected: one function per block, linked with WASM tail calls (`return_call`).** It also keeps the stack constant, but every intra-region jump would cross a function boundary. Guest registers would then have to be spilled to linear memory and reloaded per block (or passed as parameters), which gives up the main reason to form regions. Tail calls *are* the tier-2 mechanism for linking whole regions to each other (WASM_JIT.md J13), where the exit state is already in memory.
 
 ### The dispatcher
 
-`core/cpu/dispatch.c` — C code inside the core module, the hot loop of `run()`:
+`core/cpu/dispatch.c` is C code inside the core module: the hot loop of `run()`, shared with the predecoded interpreter.
 
 ```
-loop (until budget exhausted or non-resume exit):
-  entry = block_cache_lookup(pc)          // GVA → table index
+loop (until a non-resume exit):
+  entry = block_cache_lookup(pc, fp_mode)    // GVA → (slot, block, page_base)
   if miss:
-      interpret until region boundary     // immediate progress
-      request async region compile (once per region)
+      interpret up to the next block that has a region, or an exit event
+      count hotness; request a region compile when hot (once per region)
       continue
-  pc, exit_reason = call_indirect(entry)  // execute compiled region
-  switch exit_reason:
-      RESUME:        continue             // inter-region jump
-      SVC:           invoke svc_handler; return CPU_EXIT_SVC to scheduler
-      BUDGET:        return CPU_EXIT_CYCLES_ELAPSED
-      FAULT:         return CPU_EXIT_FAULT
+  next_pc = call_indirect(entry.slot, state) // execute the compiled region
+  switch state.control.exit_reason:
+      RESUME_DIRECT:   continue              // inter-region jump
+      RESUME_INDIRECT: check event (§7); continue
+      SVC:             invoke svc_handler; return CPU_EXIT_SVC to the scheduler
+      BUDGET, YIELD:   return CPU_EXIT_CYCLES_ELAPSED
+      FAULT:           return CPU_EXIT_FAULT
+      ...              (full table: WASM_JIT.md J5.4)
 ```
 
-How the C dispatcher reaches region code: the **core module exports one growable `funcref` table; region modules import it**. At instantiation (cold path) the host `table.grow`s if needed and `table.set`s each block function into allocated slots; the block cache stores table indices; `call_indirect` on that table is a genuine in-wasm call — zero JS on the dispatch hot path. Wasm tables cannot be shared across threads, but this table never needs to be: the core instance and every region instance live in the same CPU Worker — under the current single-worker design, and per-core workers (§7) would force per-worker tables and per-worker instantiation; that cost is on §7's fork price list. Instantiation itself uses the synchronous `new WebAssembly.Instance(module)` — legal and fast in a worker for an already-compiled module; do not add an async hop on the instantiate side.
+How the C dispatcher reaches region code: **the core module's `funcref` table (`__indirect_function_table`) is exported, and region modules import it.** At boot the host grows the table once, by a fixed slot capacity, and fills every new slot with an "unlinked" trampoline. Growing it needs `-sALLOW_TABLE_GROWTH=1`, a §24 change that lands with `wasm_jit`. The trampoline matters because a call to an empty slot traps, so no slot is ever empty. At installation (the cold path) the host `table.set`s each region function into the slot the core reserved for it, and the block cache stores slot indices.
 
-**Block-cache single-writer invariant, stated because it is enforced by construction rather than by code:** every mutation — instantiation on compile-message receipt, `table.set`, cache registration, SMC invalidation from SVC handlers — executes on the CPU worker thread, and cannot interleave mid-`run()` because synchronous WASM blocks the worker's event loop; messages queue until the scheduler tick returns. No locks exist because none are needed *on this design*; any change that introduces a second mutator (per-core workers, moving instantiation elsewhere) inherits the §7 fork price.
+On Emscripten a C function pointer *is* a table index, so the dispatcher calls a region as an ordinary function pointer: one genuine in-wasm `call_indirect`, with zero JS on the dispatch hot path. Emscripten's own `addFunction` uses the same mechanism. Regions call core C helpers (page-crossing accesses, exact f64 FMA, estimate tables) the same way, through the imported table, still without function imports.
 
-The interpreter is the mandatory fallback while compiles are in flight (`WebAssembly.compile` is async); for hot code the gap closes after one compilation.
+Wasm tables cannot be shared across threads, but this table never needs to be: the core instance and every region instance live in the same CPU Worker under the current single-worker design. Per-core workers (§7) would force per-worker tables and per-worker instantiation; that cost is on §7's fork price list. Instantiation itself uses the synchronous `new WebAssembly.Instance(module)`, which is legal and fast in a worker for an already-compiled module; do not add an async hop on the instantiate side. This exact shape (shared memory64 and table imports, cross-instance `call_indirect` and `return_call_indirect`, synchronous instantiation) was verified on V8 in October 2026 (WASM_JIT.md, status note).
+
+**Block-cache single-writer invariant, stated because it is enforced by construction rather than by code:** every mutation (installation on compile-message receipt, `table.set`, cache registration, invalidation) executes on the CPU worker thread. None of it can interleave mid-`run()`, because synchronous WASM blocks the worker's event loop; messages queue until the scheduler tick returns. No locks exist because none are needed *on this design*. Any change that introduces a second mutator (per-core workers, moving instantiation elsewhere) inherits the §7 fork price.
+
+The interpreter is the mandatory fallback while compiles are in flight (`WebAssembly.compile` is async); for hot code the gap closes after one compilation. **The hand-off is pull-based:** the core never calls into JS to request a compile. `cpu.worker.ts` pulls finished batches between scheduler ticks (WASM_JIT.md J8.4), which keeps `core/` platform-agnostic.
 
 ### End-to-end flow (web)
 
 ```mermaid
 flowchart TD
-    MISS["dispatcher: block cache miss at GVA"]
-    INTERP["interpret (immediate progress)"]
-    REGION["region discovery + Ballistic emit<br/>→ WASM module bytes"]
-    POST["post bytes to Compiler Worker<br/>(dedicated: SharedWorkers are a<br/>separate agent cluster and cannot<br/>structured-clone Modules back)"]
-    MEMC["in-memory module cache<br/>key: code_hash + ir_build_id + backend semver"]
-    OPFSC["OPFS byte cache (PTC)<br/>same key; stores BYTES, not modules"]
+    HOT["dispatcher: a block becomes hot<br/>(predecoded interpreter counts entries)"]
+    INTERP["keep interpreting meanwhile<br/>(immediate progress)"]
+    REGION["region formation over predecoded records<br/>+ hash of the region's code bytes"]
+    PTCQ{"translation cache (PTC):<br/>body for this key?"}
+    TRANS["wasm_jit translates<br/>→ position-independent body"]
+    BATCH["module builder: batch bodies,<br/>patch relocations → bytes in the<br/>JIT emission buffer"]
+    PULL["cpu.worker.ts pulls the batch between ticks,<br/>copies the bytes, posts them to the Compiler Worker<br/>(dedicated: SharedWorkers are a separate<br/>agent cluster and cannot structured-clone<br/>Modules back)"]
     COMPILE["WebAssembly.compile(bytes)"]
-    BACK["module → CPU worker"]
     INST["new WebAssembly.Instance(module,<br/>{ env: { memory, table } })<br/>(imports: shared memory +<br/>core funcref table only)"]
-    REG["table.set region's blocks;<br/>register table indices in block cache"]
+    REG["table.set each region into its slot;<br/>the core registers entries in the block cache"]
+    STORE["append new bodies to the PTC<br/>(OPFS, CPU worker)"]
 
-    MISS --> INTERP
-    INTERP --> REGION
-    REGION --> POST
-    POST --> MEMC
-    MEMC -->|hit| BACK
-    MEMC -->|miss| OPFSC
-    OPFSC -->|"hit: bytes"| COMPILE
-    OPFSC -->|miss| COMPILE
-    COMPILE --> MEMC
-    COMPILE --> BACK
-    BACK --> INST
-    INST --> REG
+    HOT --> INTERP
+    HOT --> REGION --> PTCQ
+    PTCQ -->|hit| BATCH
+    PTCQ -->|miss| TRANS --> BATCH
+    BATCH --> PULL --> COMPILE --> INST --> REG --> STORE
 ```
 
 ### Cache keying
 
-**Key = `hash(region code bytes) + ir_build_id + backend_version`, namespaced by titleId.** Not guest address: ASLR and title updates make GVAs unstable and collision-prone. The GVA lives in the in-memory block-cache *entry*, never in the persistent key. `ir_build_id` covers Ballistic's IR compaction pass, which can change SSA assignments for identical input bytes.
+**Key = `hash(each block's offset from the region's base page ‖ its code bytes) ‖ entry offsets ‖ FP mode ‖ ir_build_id ‖ backend_version ‖ engine_features`, namespaced by titleId** (WASM_JIT.md J10). It does not include the guest address: ASLR and title updates make GVAs unstable and collision-prone. The GVA lives in the in-memory block-cache *entry*, never in the persistent key.
+
+**The key is correct only because translated code is position-independent** (§10 requirement 8). Bodies compute every guest address from a page base the dispatcher supplies, and session-specific host constants are relocated at module assembly, so a cached body is valid at any address and in any session. v3.27 assumed this property without requiring it.
+
+`engine_features` is the bitset of feature-detected emission paths in use (§10, e.g. wide arithmetic): bytes emitted for one engine must never be served to an engine that lacks the feature. `ir_build_id` covers any translator change that alters emitted bytes for identical input; `wasm_jit` bumps it whenever its golden emission tests change.
 
 ### Persistence reality
 
-A compiled `WebAssembly.Module` **cannot** be persisted — only its bytes. Chrome removed IndexedDB module caching years ago. Consequence, stated plainly: **the PTC eliminates translation cost (ARM→WASM emission), not compile cost (`WebAssembly.compile`).** Every session pays baseline compilation of cached bytes. Baseline compile throughput is tens of MB/s of wasm, so this is acceptable — and it is why AOT pre-translation (Phase 7) is more valuable than it would be natively: it front-loads translation, and warm sessions reduce to a bulk compile at launch.
+A compiled `WebAssembly.Module` **cannot** be persisted, only its bytes; Chrome removed IndexedDB module caching years ago. Consequence, stated plainly: **the PTC eliminates translation cost (ARM→WASM emission), not compile cost (`WebAssembly.compile`).** Every session pays baseline compilation of cached bytes. Baseline compile throughput is tens of MB/s of wasm, so this is acceptable. Warm sessions skip translation for every region already in the cache, and still compile each batch as its regions become hot. That is why AOT pre-translation (Phase 7) is more valuable here than it would be natively: it front-loads translation, which is the part the cache can save.
 
-The same agent-cluster rule that forces the compiler to be a dedicated worker also means compiled Modules can never be shared across tabs — cross-tab sharing exists only at the byte level, which the OPFS PTC already is. There is nothing a SharedWorker could have added here.
+The same agent-cluster rule that forces the compiler to be a dedicated worker also means compiled Modules can never be shared across tabs. Cross-tab sharing exists only at the byte level, which the OPFS PTC already is; there is nothing a SharedWorker could have added here.
 
 ### Self-modifying code
 
-`invalidate_cache(gva, size)` drops block-cache entries whose regions overlap the range and marks their region modules dead (instances dropped; GC reclaims). Combined with the §5 write-protection fault path.
+Invalidation is driven by the events that architecturally signal a code change: vmm mapping changes (through a mutation observer) and guest `IC IVAU` followed by ISB. It does not write-protect translated pages (§5; WASM_JIT.md J8.5). It drops predecoded blocks and regions that overlap the range, resets their table slots to the trampoline, and lets GC reclaim any instance that no slot references any more. It runs only between region calls, so no region is invalidated while it executes.
 
 ---
 
@@ -1455,7 +1562,7 @@ On web, the C side's only job is writing the ring.
 | Game files (decrypted NCA) | `FileSystemDirectoryHandle` | User owns; never copy multi-GB into browser storage |
 | Save data | OPFS | Emulator managed, fast I/O, explicit quota errors |
 | Pipeline (shader) cache | OPFS sync access handle (Worker) | Frequent small reads on render hot path |
-| Translation cache (PTC) — **WASM bytes** | OPFS sync access handle (Worker) | See §11: bytes only; modules cannot be persisted |
+| Translation cache (PTC) — **WASM region bodies** | OPFS sync access handle (CPU Worker) | See §11: bytes only, modules cannot be persisted; bodies are assembled into modules per session (WASM_JIT.md J10) |
 | Downloaded mods | OPFS | Emulator managed |
 | Large mod packs | `FileSystemDirectoryHandle` | User owns, read directly |
 | Compatibility DB | Compatibility Shared Worker memory | Shared across tabs |
@@ -1470,15 +1577,15 @@ Validity metadata lives in IndexedDB; blobs live in OPFS.
 ```typescript
 interface TranslationCacheMetadata {
   readonly titleId:         string;
-  readonly backendVersion:  string;  // Ballistic semver
-  readonly irBuildId:       string;  // invalidates on IR compaction-affecting changes
+  readonly backendVersion:  string;  // wasm_jit semver
+  readonly irBuildId:       string;  // bumps when emitted code changes for identical input
   readonly entryCount:      number;
   readonly lastUsedAt:      number;  // LRU eviction
   readonly byteSize:        number;
 }
 ```
 
-Per §11: PTC entries are keyed by **content hash of the region's code bytes** + `irBuildId` + `backendVersion`, namespaced by titleId — never by guest address. Pipeline cache entries are keyed by shader-microcode hash + decompiler version (§13).
+Per §11: PTC entries are position-independent region function bodies, keyed by a **content hash of the region's code bytes and in-page layout**, plus FP mode, `irBuildId`, `backendVersion` and the engine-feature bitset, and namespaced by titleId. They are never keyed by guest address (WASM_JIT.md J10). Pipeline cache entries are keyed by shader-microcode hash + decompiler version (§13).
 
 ### LRU eviction
 
@@ -1546,6 +1653,8 @@ Content-Security-Policy: frame-ancestors 'none'
 **Correction (verified against shipping Chromium, not assumed):** an earlier revision of this document specified `same-origin-allow-popups` here on the theory that it both enables `crossOriginIsolated` and lets OAuth popups (§15) retain opener access. Only the second half is true. Tested directly: `same-origin-allow-popups` + `require-corp` yields `crossOriginIsolated === false`; only strict `same-origin` yields `true`. The two properties `same-origin-allow-popups` was chosen for are not jointly available from COOP alone — cross-origin isolation requires the strict value. This is not a regression to fix later; it means Voland was never going to get both from one header, and doesn't need to: the §15 OAuth callback already uses `BroadcastChannel`, not `window.opener` (see "No window messaging API" below), so nothing about the popup flow actually depended on the weaker COOP value. Also **severs cross-origin openers** the same way `same-origin-allow-popups` would have (a cross-origin `window.open("voland.app")` lands in a different browsing-context group; the opener's WindowProxy detaches, postMessage is dead) — that property was never unique to the popups variant. Do not "fix" this back to `same-origin-allow-popups`; it silently disables cross-origin isolation while looking correct in code review.
 
 `frame-ancestors 'none'` is **load-bearing for the consent architecture**, not hygiene: an embedding iframe gets a message channel and, worse, UI redressing of the §19/§20 consent prompts — a clickjacked consent button defeats every override/bridge/CA control in the system. The main build is never embeddable; the sole exception is the kiosk build below, which is embeddable precisely because those consent surfaces don't exist in it.
+
+**No `script-src`, and any future one must include `'wasm-unsafe-eval'`.** `wasm_jit` compiles generated module bytes at runtime (§11). A `script-src` without that source would make the JIT stop compiling while the interpreter kept running: a performance cliff with no error a user would see (WASM_JIT.md J9).
 
 ### Kiosk build (build-time flag, self-host only)
 
@@ -1731,16 +1840,16 @@ type MainToGPUMessage =
   | { type: "init";   canvas: OffscreenCanvas; memory: WebAssembly.Memory; layout: MemoryLayout }
   | { type: "resize"; width: number; height: number };
 
-// CPU Worker ↔ Compiler Worker (dedicated, §11: region granularity)
+// CPU Worker ↔ Compiler Worker (dedicated, §11: batches of region functions).
+// The compiler is stateless: the PTC holds bodies the core assembles itself
+// (WASM_JIT.md J9, J10), so no cache key travels here.
 type CPUToCompilerMessage = {
-  readonly requestId: number;
-  readonly titleId:   string;
-  readonly cacheKey:  string;      // hash(code bytes) + irBuildId + backendVersion
-  readonly wasmBytes: Uint8Array;  // emitted region module bytes
+  readonly batchId: number;
+  readonly bytes:   ArrayBuffer;   // transferred: a copy of one batch module
 };
 type CompilerToCPUMessage =
-  | { readonly requestId: number; readonly module: WebAssembly.Module }
-  | { readonly requestId: number; readonly error: string };
+  | { readonly batchId: number; readonly module: WebAssembly.Module }
+  | { readonly batchId: number; readonly error:  string };
 ```
 
 ### Service Worker
@@ -1790,7 +1899,7 @@ One consolidation has defensible arithmetic and is the named Phase 8 revisit opt
 
 ### voland-cli: the first desktop artifact
 
-The desktop core ships first as a CLI with **zero Qt dependency** — because the test infrastructure requires it, not as a convenience: Phase 3/4 golden-image tests and interpreter-vs-JIT differential runs need a headless runner (offscreen render-to-texture via Dawn, hash, exit code). Subcommands: `run` (headless or windowed), `verify-dump` (hash-check decrypted input without booting), `ptc-precompile`, `cache` (inspect/evict), `save-export`/`save-import`. CI links voland-cli, never a GUI toolkit. The Phase 8 Qt app is a frontend over the same core — by then battle-tested by every CI run since Phase 3 — and the CLI doubles as the integration point for launcher frontends (EmulationStation-class).
+The desktop core ships first as a CLI with **zero Qt dependency** — because the test infrastructure requires it, not as a convenience: Phase 3/4 golden-image tests and native differential runs (interpreter vs. Unicorn, and vs. ballistic-x86 if integrated; `wasm_jit` differentials run under Node and headless Chrome, §10) need a headless runner (offscreen render-to-texture via Dawn, hash, exit code). Subcommands: `run` (headless or windowed), `verify-dump` (hash-check decrypted input without booting), `ptc-precompile`, `cache` (inspect/evict), `save-export`/`save-import`. CI links voland-cli, never a GUI toolkit. The Phase 8 Qt app is a frontend over the same core — by then battle-tested by every CI run since Phase 3 — and the CLI doubles as the integration point for launcher frontends (EmulationStation-class).
 
 **Xbox is demoted from the committed matrix to exploratory.** Three reasons, each sufficient: Dev-Mode sideloaded apps are memory-capped on older hardware well below Voland's ~5GB working set (must be re-verified against current caps per console generation before any commitment); the WinUI 2 / UWP stack is deprecated; and it competes for effort with platforms that reach more users. Two more make it categorical: JIT is Dev-Mode-only (retail UWP bans dynamic code generation, so distribution is a null set), and even the browser path fails — Edge on Xbox lives under the same memory regime, so the boot-time ~5.25GB allocation is refused at step one. **The exit condition is platform convergence, not porting effort:** if Microsoft's Windows/Xbox convergence direction ships consoles that run Windows applications, the Windows build works there unmodified and this row resurrects for free. Until then, no Xbox-specific code is written.
 
@@ -2159,7 +2268,7 @@ Debug Emscripten builds link the core as `MAIN_MODULE=1` with each HLE service a
 ### CMake options
 
 ```cmake
-option(CPU_BACKEND   "noop|interpreter|ballistic"          "noop")
+option(CPU_BACKEND   "noop|interpreter|wasm_jit|ballistic" "noop")  # wasm_jit: web only
 option(GPU_BACKEND   "webgpu|vulkan|metal|d3d12|auto"      "auto")
 option(AUDIO_BACKEND "wasapi|coreaudio|pipewire|none|auto" "auto")  # web: none (§14)
 ```
@@ -2205,12 +2314,14 @@ Flag spellings are pinned to what Emscripten 6.0.9 accepts without `-Wdeprecated
 
 Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), memory pinned to the full layout size with growth disabled, memory64 reclassified from Switch 2 prep to a Switch 1 requirement. Changes in v3.21: flag spellings modernized (see table).
 
+**Pending with `wasm_jit` (Phase 5), not added before then:** `-sALLOW_TABLE_GROWTH=1`. It lets the CPU worker grow the core's `funcref` table once, at boot, by the JIT slot capacity, so region functions can be `table.set` into reserved slots (§11, WASM_JIT.md J8.3). Table growth is unrelated to memory growth: `ALLOW_MEMORY_GROWTH=0` stays (§4). Before the flag lands, two things are verified on the pinned Emscripten: its spelling, and whether wasm64 builds export a 32- or 64-bit-indexed table (WASM_JIT.md J17).
+
 ### Platform build targets
 
 ```cmake
 # Web:      cmake -DCMAKE_TOOLCHAIN_FILE=$EMSDK/.../Emscripten.cmake \
-#                 -DCPU_BACKEND=ballistic -DGPU_BACKEND=webgpu ..
-# Desktop:  cmake -DCPU_BACKEND=ballistic -DGPU_BACKEND=auto ..
+#                 -DCPU_BACKEND=wasm_jit -DGPU_BACKEND=webgpu ..
+# Desktop:  cmake -DCPU_BACKEND=interpreter -DGPU_BACKEND=auto ..   # or =ballistic once unlocked (§10)
 # Apple:    cmake -G Xcode -DCMAKE_SYSTEM_NAME=iOS ..
 # Android:  cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 ..
 ```
@@ -2253,7 +2364,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 2 — First Instructions
 
-- [ ] Interpreter backend (partial ARM64), all memory access via vmm
+- [ ] Interpreter backend (partial ARM64), all memory access via vmm. Its decoder is generated from ARM's machine-readable A64 spec and emits the record format `wasm_jit` shares (WASM_JIT.md J3), checked by Unicorn differential fuzzing (§10)
 - [ ] NRO loader — homebrew is this phase's proof of life
 - [ ] **Guest thread scheduler** (§7): bounded run, exit reasons, wait objects, virtual time
 - [ ] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler
@@ -2277,9 +2388,10 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 5 — Playable Core (+ Compatibility Database)
 
-- [ ] Ballistic-x86 integration on desktop: region compilation, dispatcher, exit-code ABI (§10–11). This validates all dispatcher/block-cache/PTC infrastructure backend-agnostically; the WASM emitter slots in whenever upstream resumes it
-- [ ] **Predecoded interpreter** for web: decode blocks once into a dense internal form (op index + extracted operands), execute the predecoded form. 2–4x over fetch-decode-execute, backend-independent, and its block discovery/invalidation is the same machinery the JIT dispatcher uses. This is the web execution path until Ballistic-WASM exists — treat it as a deliverable, not a stopgap
-- [ ] PTC first cut (desktop, against ballistic-x86): content-hash keys, OPFS bytes, session compile
+- [ ] **Predecoded interpreter** (all platforms) on the shared dispatcher and block cache (§11): decode blocks once into the dense record form (op index + extracted operands, WASM_JIT.md J3) and execute that. 2–4x faster than fetch-decode-execute, backend-independent, and its block discovery and invalidation are the machinery the JIT uses. This is the execution path until a JIT reaches coverage: treat it as a deliverable, not a stopgap
+- [ ] **`wasm_jit` tier 1** (§10, [WASM_JIT.md](WASM_JIT.md)): region translation meeting requirements 1–8, the exit-code ABI, table slots and pull-based installation, with interpreter-vs-JIT differentials under Node and headless Chrome on V8, JSC and SpiderMonkey
+- [ ] PTC first cut (web, against `wasm_jit`): content-hash keys over position-independent bodies, OPFS, per-session compile
+- [ ] Ballistic-x86 integration on desktop (optional; once unlocked and upstream coverage suffices, §10)
 - [ ] Pipeline cache (OPFS, microcode-hash keys)
 - [ ] Software TLB if profiling justifies it (§5)
 - [ ] **Compatibility database — first cut.** As soon as any game runs, users need a public works/doesn't/hangs-at-X list.
@@ -2321,7 +2433,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 **If you know C:** the highest-leverage early subsystems are `vmm` (§5) and the scheduler (§7) — they gate everything — followed by HLE services from the §12 priority list, using Ryubing's C# implementations as behavioral references.
 
-**If you know compiler engineering:** the Ballistic WASM backend. Join the Pound Discord ([discord.gg/aMmTmKsVC7](https://discord.gg/aMmTmKsVC7)); the §10 contract items are the current integration questions.
+**If you know compiler engineering:** `wasm_jit`, Voland's ARM64→WASM translator (§10). Its specification is [`docs/WASM_JIT.md`](WASM_JIT.md). The work opens in Phase 5 (the shared A64 decoder in Phase 2), and its interface headers go through header review first.
 
 ### Code review requirements
 
@@ -2339,6 +2451,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 | [Ryubing](https://github.com/Ryubing) | C# | HLE service behavior |
 | yuzu (archived) | C++ | Maxwell command buffer format, GPU approach |
 | dynarmic | C++ | ARM instruction semantics, edge cases, test suite |
+| Ballistic | C | tier-1 ARM64 translation techniques: ideas only, never code (§10) |
 
 ---
 
@@ -2346,9 +2459,9 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Ballistic
 
-- Repo: [github.com/pound-emu/ballistic](https://github.com/pound-emu/ballistic) · Discord: [discord.gg/aMmTmKsVC7](https://discord.gg/aMmTmKsVC7)
-- Status: working barebones x86 backend; WASM backend in design
-- Voland's integration contract: §10
+- Repo: [github.com/pound-emu/ballistic](https://github.com/pound-emu/ballistic) (GPLv2; GitHub issues are the contact channel)
+- Status (October 2026): a tier-1 x86 compiler translating ARM64 directly, without the IR; the tier-2/IR code was removed upstream; no WASM backend
+- Role in Voland: optional desktop x86 backend, consumed unmodified, and a source of ideas (not code) for `wasm_jit` (§10)
 
 ### Nintendo Switch hardware
 
@@ -2378,10 +2491,10 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 | **memory64 bounds-check overhead** | Medium | High (it exists; magnitude varies) | ~5–15% on memory-heavy code, engine-dependent — measurable per engine now that memory64 is cross-browser. Mitigation: hot host structs in the low 4GB (§4); named escape hatch is multi-memory, gated on toolchain support (§4). Separately: the ~16GB per-memory browser cap is a hard Switch 2 constraint (§4). |
 | ~5.25GB shared-memory allocation fails on constrained devices | Medium | Medium | Detect at boot, fail with a specific message directing to native builds (§16). No graceful degradation is possible — the address space is the requirement. |
 | Softmmu overhead makes web performance unplayable for heavy titles | Medium | Medium | Two-load walk is the floor; software TLB and contiguous-heap fast paths are the measured escalations (§5). If insufficient, lighter titles remain viable on web and heavy titles are a native-build recommendation. |
-| Ballistic-WASM stays paused indefinitely (IR instability; currently paused at maintainer's request) | Medium–high for web perf | **Realized** — it is paused now | Web runs the predecoded interpreter (§25 Phase 5) with no JIT timeline. Mitigations: file §10 items as design input while the IR is malleable; validate all dispatcher/PTC infrastructure on ballistic-x86 desktop so the WASM emitter drops into finished plumbing. NOT a mitigation: forking, vendoring IR headers, or a homegrown emitter against the unstable IR — permanent divergence against a moving upstream. |
-| Ballistic-x86 doesn't reach coverage in time | Medium | Medium | Interpreter keeps everything functional on desktop too; the project ships without it. Performance, not existence, is what's at stake. |
-| Ballistic upstream rejects §10 contract items when WASM work resumes | Medium | Low–medium | Filed early as design input (see row above) precisely so this surfaces before anything is built against them. |
-| Per-session `WebAssembly.compile` of PTC bytes is too slow at launch for large titles | Low–medium | Low | Baseline compile is tens of MB/s; if launch stalls appear, compile lazily per region on first execution instead of bulk-at-boot. AOT (Phase 7) shifts the balance further. |
+| `wasm_jit` is a large, Voland-owned compiler effort | Medium–high for web perf | Medium | Tier 1 is direct translation over the predecoded records, with no compiler IR (§10); the browser's WASM tiers do register allocation and generic optimization. Coverage is incremental: untranslated instructions fall back to the interpreter, and per-form counters direct the work. The predecoded interpreter (§25 Phase 5) is a deliverable, so the web build works without the JIT. The shared generated decoder and Unicorn fuzzing exist from the Phase 2 interpreter, before the JIT starts. Contributor recruitment for it starts with Phase 5. |
+| Exact FP semantics (NaN fixups, emulated FMA) cost too much on FP-heavy titles | Medium | Medium | Measured per instruction form in Phase 5. The NaN fixup's common path is one compare. A relaxed-SIMD FMA path is gated on evidence that it fuses deterministically (WASM_JIT.md J11). Inexact opt-in modes are not offered (§3). Heavy titles fall back to the native-build recommendation, as in the softmmu row. |
+| Ballistic-x86 doesn't reach coverage, or its memory interface can't be reconciled with §5 | Low | Medium | Optional backend: desktop runs the predecoded interpreter, and the web build is the fast path on desktop too. Performance, not existence, is what's at stake. |
+| Per-session `WebAssembly.compile` of PTC bytes is too slow at launch for large titles | Low–medium | Low | Baseline compile is tens of MB/s, and compilation is already lazy: batches compile as their regions become hot (WASM_JIT.md J4.7), not in bulk at boot. AOT (Phase 7) shifts the balance further. |
 | WebGPU rendering differences across the three implementations (Dawn / wgpu / WebKit) | Medium | Medium | WebGPU is Baseline (Jan 2026) and worker-context support is verified on all three engines (§13); remaining gaps are Firefox Linux/Android rollout and per-implementation rendering differences. Boot-time capability check; golden-image tests run per engine in CI. |
 | COEP `require-corp` breaks third-party assets | Medium | Medium | First-party assets only; documented for self-hosters; SW re-injects headers on cached responses (§16). |
 | SW COOP/COEP injection first-visit reload confuses users/hosters | Low | Medium | Guarded single-reload in boot (§16); deployment docs say "set real headers." |
@@ -2389,15 +2502,29 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 | ASTC transcoder bugs corrupt rendering | Low | Low | Cache key includes transcoder version; bump forces rebuild. |
 | WebRTC LDN timing differs from WiFi | Low–medium | High | Documented limitation; frame-perfect multiplayer titles may differ. Not a project-killer. |
 
-Removed from v2: the dynarmic row (dependency dropped), the frame-interpolation implications (feature deleted), and the Xbox rows (platform demoted to exploratory, §17). Added: memory64 overhead, softmmu performance, Ballistic contract rejection, PTC compile latency — the risks the v2 architecture couldn't see because it hadn't made the §1-Overview load-bearing decisions explicit.
+Removed from v2: the dynarmic row (dependency dropped), the frame-interpolation implications (feature deleted), and the Xbox rows (platform demoted to exploratory, §17). Added: memory64 overhead, softmmu performance, Ballistic contract rejection, PTC compile latency — the risks the v2 architecture couldn't see because it hadn't made the §1-Overview load-bearing decisions explicit. v3.28 replaced the three Ballistic rows with the `wasm_jit` effort, exact-FP cost, and optional ballistic-x86 rows.
 
 The format of this register is "what could go wrong," not "what will go wrong." The two genuine existential concerns remain Nintendo legal action and the Apple JIT entitlement; §1.6 addresses the first structurally, and web-primacy contains the second.
 
 ---
 
-*Document version: 3.27.0*
-*Last updated: September 2026*
+*Document version: 3.28.0*
+*Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.27 → v3.28 (summary)
+
+- **§10 rewritten, "Ballistic Integration Plan" → "JIT Backends".** The web JIT is now Voland's own ARM64→WASM translator, `wasm_jit` (Phase 5), specified in the new **[`docs/WASM_JIT.md`](WASM_JIT.md)**. Ballistic is demoted to an optional desktop x86 backend, consumed unmodified. The reason, from Ballistic's repository as of October 2026: its working tier-1 x86 compiler translates ARM64 directly, lowering inside its x86 assembler with no IR on the executing path; the tier-2/IR code was removed upstream on 2026-06-19; there is no WASM work; and the Discord design-input channel no longer reaches the maintainer. v3.27 waited for an IR to stabilize, and that IR gates nothing that exists. Forking is rejected, with reasons, in §10. This folds in an unmerged October draft of the same decision. That draft deferred the specification to Phase 5; this version writes it, and names the shared predecoded record format as the IR.
+- **The IR is the predecoded interpreter's record format** (§10, WASM_JIT.md J3). One generated A64 decoder (Phase 2) produces 16-byte records with static per-form metadata (registers and flags read and written, memory access, block-ending kind). The predecoded interpreter executes them; `wasm_jit` lowers regions of them to WASM. There is no SSA or micro-op layer: the browser's WASM tiers already do the generic optimizations, and the ARM-aware ones (guest registers in locals, lazy NZCV, a per-region TLB) need only the per-instruction facts. §25 Phase 2's interpreter line now carries the decoder requirement.
+- **Requirements 1–7**, filed against Ballistic in v3.27, become `wasm_jit`'s own, refined. Region functions have the type `(i64 ctx) → i64`, taking the thread's `A64_State`, rather than `() → i64`. Host constants are relocated at module assembly. Modules are batched. **Requirement 8 is new: position-independent code.** §11's GVA-free content-hash cache key was only correct if translated code embeds no absolute guest addresses, which v3.27 assumed without requiring.
+- **§7: deterministic preemption.** Budget check events are taken backward direct branches and indirect branches, not block entries. Cycles count retired instructions. The interpreter and the JIT therefore preempt at identical points regardless of what is compiled when, which is what makes §3's interpreter-vs-JIT differentials exact. The exclusive-monitor starvation guard's layer 1 becomes "check events are skipped while the monitor is open", replacing "regions never split an exclusive pair", which compare-and-swap loops break. Layer 2's cap now has one definition for both backends. YIELD, WFE and WFI end the thread's slice.
+- **§5: self-modifying code** is handled by a vmm mutation observer (mapping changes) and guest `IC IVAU` + ISB (physical-page granularity, so CodeMemory aliases work), not by write-protecting translated pages. `QueryMemory` would expose a JIT-cleared W bit (§3), and Horizon's W^X makes write-protection unnecessary. A `VMM_PTE_WRITE_WATCH` fallback is specified but not built. §7's scheduler no longer treats FAULT as a possible SMC path.
+- **§11:** regions are single functions (`loop` + `br_table`, forward edges as `br`) with multiple entries (BL return sites), formed only for hot code, specialized on FPCR mode bits, and batched up to 16 per module. One function per block linked by calls overflows the WASM stack on guest loops; tail calls are rejected inside regions and reserved for tier-2 linking between regions. The table is grown once at boot and every slot holds a callable trampoline (a call to an empty slot traps). The core↔JS hand-off is pull-based. The PTC stores region function bodies; its key gains entry offsets, FP mode and the engine-feature bitset. The end-to-end flow diagram is redrawn without the compiler-worker module cache. The shape (shared memory64 and table imports, cross-instance `call_indirect` and `return_call_indirect`) was verified on V8.
+- **§10 "Engine features beyond baseline WASM":** branch hinting is adopted in tier 1; wide arithmetic is feature-detected and joins the cache key; relaxed SIMD is excluded for exactly-defined ops; tail calls are reserved for tier 2; JSPI is not needed; the JIT interface proposal is a watch item. **"Carried forward from the 2026 WASM backend draft"** reuses the maintainer's own tier-1 design (three layers, emission contract, all-`i64` locals, padded LEB, branch-free division, layered tests), with a table of the decisions superseded by Voland's contracts. **"Ideas inherited from Ballistic"** lists them under hard rule 2, with the rejected ones.
+- **§16:** a CSP note (any future `script-src` needs `'wasm-unsafe-eval'`), and new CPU↔compiler message types (batch bytes in, Module out; no cache key). **§24:** `CPU_BACKEND=wasm_jit` (web only); `-sALLOW_TABLE_GROWTH=1` recorded as pending with `wasm_jit`, not added. **§15:** PTC metadata comments.
+- **Ripple edits:** §1 overview and recompiler dependency; §2 tree (`docs/WASM_JIT.md` replaces the never-written `WASM_BACKEND.md`; `core/cpu/a64/`; `backends/wasm_jit/`); §3 differential-run wording; §6 compiler-worker node; §8 backend diagram, register-file comment and externs; §9; §17 differential wording; §25 Phase 2 and Phase 5 tasks (predecoded interpreter on all platforms, `wasm_jit` tier 1 and the PTC first cut on the web, ballistic-x86 optional); §26 contributor pointer and reference table; §27 Ballistic entry; §28 risk rows. CLAUDE.md rule 10 (the maintainer lifted the homegrown-emitter ban) and rule 2, CONTRIBUTING.md and README were updated to match.
+- **§1.6: the CPU's Cryptographic Extension is not decryption code** (WASM_JIT.md J17 question 1, decided by the maintainer before merge). The A57's AES, SHA and PMULL instructions are implemented as plain guest semantics, in one file shared by every backend, starting with the Phase 2 interpreter. CONTRIBUTING.md and CLAUDE.md list hits under `core/cpu/` that name or implement the four AES forms as a standing exception to the `aes`/`decrypt` tripwire.
+- **Docs only.** No code or header changes. `cpu.h`, `vmm.h` and the new `core/cpu/a64/` and `wasm_jit` headers are proposed in WASM_JIT.md J15 and go through header review when their phase opens. The remaining open questions for the maintainer are listed in WASM_JIT.md J17.
 
 ### Changelog v3.26 → v3.27 (summary)
 
