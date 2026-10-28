@@ -129,8 +129,9 @@ summarized:
    parsing of encrypted NSP/XCI. The loader consumes pre-decrypted NCA only
    (§1.6). If a task seems to require decryption, stop and say so instead
    of implementing it.
-2. **Never copy code** from Ryubing, yuzu, dynarmic, or any other emulator.
-   Read them for behavior; reimplement from the observed behavior.
+2. **Never copy code** from Ryubing, yuzu, dynarmic, Ballistic, or any other
+   emulator or recompiler. Read them for behavior; reimplement from the
+   observed behavior.
 3. The three load-bearing architectural decisions are fixed — don't
    "simplify" around them: one linear memory (no separate `SharedArrayBuffer`
    for anything the C core touches, §4); all guest memory access goes
@@ -150,8 +151,12 @@ summarized:
 9. No aggregation servers, no cloud cache, no telemetry, no code that
    connects to Nintendo's servers or ships Nintendo endpoints/DNS
    names/certificates (§1.6, §15, §20). Mod repos are mechanism only.
-10. `core/cpu/backends/ballistic/**` and `recompiler/` are off-limits until
-    unlocked by the maintainer.
+10. The web JIT is Voland's own `core/cpu/backends/wasm_jit/` (§10,
+    [`docs/WASM_JIT.md`](docs/WASM_JIT.md)), a Phase 5 deliverable written
+    to reviewed headers. Ballistic is ideas only, never code. `recompiler/`
+    (Ballistic) is never modified, forked, or vendored, and
+    `core/cpu/backends/ballistic/**` is off-limits until unlocked by the
+    maintainer.
 
 ## Review tripwires
 
@@ -171,6 +176,16 @@ grep -rn  "addEventListener(.message"    platform/web/src/       # zero allowed 
 the one place that's allowed to call it, so every other subsystem doesn't
 have to.
 
+The four AES instructions of the A64 Cryptographic Extension (AESE, AESD,
+AESMC, AESIMC) are the accepted exception to the `aes`/`decrypt` pattern:
+they are guest CPU semantics, not decryption of Nintendo content (§1.6). A
+game runs them on its own data, as on hardware; Voland's host code never
+calls them. Hits under `core/cpu/` that name or implement them need no
+justification. Expect them in the generated decoder tables in
+`core/cpu/a64/` and in the one file, shared by every backend, that
+implements them. Any other `aes` or `decrypt` hit still needs its
+justification.
+
 ## Where to start
 
 **TypeScript/JavaScript:** the web platform layer develops entirely against
@@ -183,9 +198,10 @@ and the guest thread scheduler (§7) — they gate almost everything else —
 followed by HLE services from the §12 priority list. Use Ryubing's C#
 implementations as a behavioral reference only (see hard rule 2).
 
-**Compiler engineering:** the Ballistic WASM backend, once unlocked (see
-hard rule 10). Join the Pound Discord and engage on IR design before it
-solidifies; the integration contract is §10.
+**Compiler engineering:** `wasm_jit`, Voland's ARM64→WASM translator (see
+hard rule 10). Its specification is [`docs/WASM_JIT.md`](docs/WASM_JIT.md).
+It opens in Phase 5 (the shared A64 decoder lands with the Phase 2
+interpreter), and its interface headers go through header review first.
 
 ## Code review requirements
 

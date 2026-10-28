@@ -4,7 +4,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development — **Phase 1 (Load & Memory)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 0 (skeleton) is complete: the linear-memory layout, no-op CPU backend, SVC/HLE dispatcher stub, and web boot path (single shared memory, COOP/COEP, Workers) all build and pass CI natively and under Emscripten. The softmmu (`core/common/vmm`), the decrypted-NCA parsers (`core/hle/loader`: NCA container, ExeFS, RomFS, npdm — pre-decrypted input only, per §1.6), the NSO loader (LZ4 via vendored `core/third_party/lz4`), the process bootstrap (`core/hle/kernel`: NSOs mapped through vmm at an ASLR'd base, Horizon region layout, main-thread stack and entry ABI — `emulator_load_program` runs the whole path), TLS allocation with `tpidrro_el0` plumbing (`tls.{h,c}` per-process block allocator, `thread.{h,c}` thread objects), and the memory SVCs (`hle/kernel/svc_memory.{h,c}`: SetHeapSize, MapMemory, UnmapMemory, QueryMemory as thin layers over vmm) have landed; next is the minimal IPC + sm: stub. Nothing executes guest code yet — the interpreter is a Phase 2 goal.
+> **Status:** Early development: **Phase 1 (Load & Memory)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 0 and most of Phase 1 have landed and pass CI natively and under Emscripten: the softmmu, decrypted-NCA and NSO loading with process bootstrap, TLS, and the memory SVCs. Next is the minimal IPC + `sm:` stub. Nothing executes guest code yet: the interpreter arrives in Phase 2, and the web JIT (now Voland's own ARM64→WASM translator, `wasm_jit`, since Ballistic's WASM backend fell through) is designed in [WASM_JIT.md](docs/WASM_JIT.md) and lands in Phase 5.
 
 ---
 
@@ -35,7 +35,7 @@ A single C11 core compiles to every target platform via CMake. The CPU backend i
 
 ```
 core/
-  cpu/          ← abstract backend interface + no-op, interpreter, dynarmic, ballistic
+  cpu/          ← abstract backend interface + no-op, interpreter, wasm_jit (web), optional ballistic (desktop)
   hle/          ← Switch OS service implementations
   gpu/          ← Maxwell GPU emulation
   audio/        ← DSP emulation and audio pipeline
@@ -51,7 +51,7 @@ platform/
   linux/        ← Qt + Vulkan
   xbox/         ← WinUI 2 + D3D12 (Developer Mode)
 
-recompiler/     ← Ballistic (git submodule)
+recompiler/     ← Ballistic (git submodule, optional desktop backend)
 ```
 
 Full architecture documentation: [DESIGN.md](docs/DESIGN.md)
@@ -60,18 +60,18 @@ Full architecture documentation: [DESIGN.md](docs/DESIGN.md)
 
 ## Recompiler
 
-The primary recompiler target is [Ballistic](https://github.com/pound-emu/ballistic), a C rewrite of dynarmic currently in early development. Ballistic targets the specific performance bottlenecks in dynarmic - JIT state cache line overflow, block eviction pathology, heavy IR memory footprint, and missing peephole optimisation.
+The primary recompiler target is `wasm_jit`, Voland's own ARM64→WASM translator, planned for Phase 5 ([DESIGN.md §10](docs/DESIGN.md#10-jit-backends); specification in [WASM_JIT.md](docs/WASM_JIT.md)). It translates hot guest code into WebAssembly modules that the browser compiles to native code, and shares its decoder and instruction format with the interpreter. [Ballistic](https://github.com/pound-emu/ballistic), a C ARM64 recompiler with an x86 backend, is an optional desktop backend consumed unmodified. Its WASM backend never materialized, which is why Voland builds its own.
 
-The CPU backend vtable means Voland is not blocked on Ballistic. Current backend status:
+The CPU backend vtable means Voland is not blocked on any recompiler. Current backend status:
 
 | Backend | Status | Notes |
 |---|---|---|
 | noop | Complete | Default - everything except game execution is testable |
-| interpreter | Planned | Slow but correct, unblocks homebrew |
-| dynarmic | Planned | Interim desktop backend - archived upstream, requires patching for GCC 14 |
-| ballistic | Planned | Primary target, wired in when instruction coverage is sufficient |
+| interpreter | Planned (Phase 2; predecoded form in Phase 5) | Slow but correct, unblocks homebrew; the execution path on every platform until a JIT lands |
+| wasm_jit | Designed, Phase 5 | Primary target on web - ARM64 → WASM translation of hot code regions |
+| ballistic | Optional | Desktop x86 only, wired in when upstream instruction coverage is sufficient |
 
-The WASM JIT pipeline - ARM bytecode → WASM bytecode → `WebAssembly.compile()` → cached module - is architecturally proven. Ballistic providing a WASM bytecode emission backend makes Voland the only Switch emulator that runs natively in a browser, on iOS without App Store restrictions, and on Xbox UWP. No other ARM recompiler targets this deployment surface.
+The browser side of the pipeline - WASM bytes → `WebAssembly.compile()` → instantiate against the core's shared memory and function table - is proven ([`poc/02_wasm_pipeline`](poc/), and the probe recorded in WASM_JIT.md); `wasm_jit` is the translator that feeds it.
 
 ---
 
@@ -138,10 +138,10 @@ cmake -B build -DCPU_BACKEND=noop
 # Interpreter - slow but executes ARM code
 cmake -B build -DCPU_BACKEND=interpreter
 
-# Dynarmic - desktop only, requires GCC 13 or patched GCC 14
-cmake -B build -DCPU_BACKEND=dynarmic
+# wasm_jit - web build only, Phase 5
+emcmake cmake -B build-web -DCPU_BACKEND=wasm_jit
 
-# Ballistic - when available
+# Ballistic - optional desktop backend, once unlocked
 cmake -B build -DCPU_BACKEND=ballistic
 ```
 
@@ -153,13 +153,13 @@ cmake -B build -DCPU_BACKEND=ballistic
 
 **If you know TypeScript / JavaScript:** The web platform layer is the right entry point. The CPU backend is a no-op stub - the entire frontend, storage layer, Worker architecture, and Service Worker can be built and tested without any emulation knowledge. Start with `platform/web/`.
 
-**If you know C:** The HLE service layer needs contributors. Pick any unimplemented service from the priority list in [DESIGN.md](docs/DESIGN.md#8-hle-service-layer) and implement it in C. Study [Ryubing](https://github.com/Ryubing) as a reference for service behaviour - reimplement in C, do not copy code.
+**If you know C:** The HLE service layer needs contributors. Pick any unimplemented service from the priority list in [DESIGN.md §12](docs/DESIGN.md#12-hle-service-layer) and implement it in C. Study [Ryubing](https://github.com/Ryubing) as a reference for service behaviour - reimplement in C, do not copy code.
 
-**If you know compiler engineering:** The highest-leverage contribution is the Ballistic WASM bytecode emission backend. Join the [Pound Discord](https://discord.gg/aMmTmKsVC7) and engage on IR design before it solidifies. The three requirements are documented in [DESIGN.md](docs/DESIGN.md#7-ballistic-integration-plan).
+**If you know compiler engineering:** The highest-leverage contribution is `wasm_jit`, Voland's ARM64 → WASM translator. It opens in Phase 5; its specification is [WASM_JIT.md](docs/WASM_JIT.md) and its requirements are in [DESIGN.md §10](docs/DESIGN.md#10-jit-backends).
 
 ### Standards
 
-- C11 for core - no C++ except the dynarmic wrapper
+- C11 for core - no C++
 - TypeScript strict mode - no `any`, no implicit returns
 - No third-party dependencies not listed in DESIGN.md
 - HLE services must be validated against known-good game output before merge
@@ -174,13 +174,14 @@ These are studied as reference, not forked:
 | [Ryubing](https://github.com/Ryubing) | HLE service implementations |
 | yuzu (archived) | GPU emulation approach |
 | dynarmic | ARM instruction semantics and test cases |
+| [Ballistic](https://github.com/pound-emu/ballistic) | Tier-1 ARM64 translation techniques - ideas only, never code |
 | [Emscripten Relooper](https://github.com/WebAssembly/binaryen/blob/main/src/cfg/Relooper.h) | CFG → structured control flow |
 
 ---
 
 ## Proof of concept
 
-`poc/` contains three standalone demonstrations built to validate the architecture and make the case for Ballistic WASM support:
+`poc/` contains three standalone demonstrations built to validate the architecture and make the case for Ballistic WASM support. They are historical: Ballistic's WASM backend never materialized, and Voland now builds its own (`wasm_jit`, [DESIGN.md §10](docs/DESIGN.md#10-jit-backends)).
 
 **`01_dynarmic_bottlenecks/`** - a synthetic ARM64 benchmark fed directly to dynarmic with no ROM, no HLE, no game. Measures the three performance pathologies documented in Ballistic's own README: JIT state cache line overflow, prologue/epilogue overhead per Run() call, and block eviction cost under cache invalidation.
 
@@ -210,7 +211,7 @@ The name has a second well-known association: Voland is also Mikhail Bulgakov's 
 
 ## Acknowledgements
 
-- [Ballistic](https://github.com/pound-emu/ballistic) - the planned primary recompiler
+- [Ballistic](https://github.com/pound-emu/ballistic) - optional desktop backend and a source of ideas for `wasm_jit`
 - [Ryubing](https://github.com/Ryubing) - HLE reference implementation
-- [dynarmic](https://github.com/merryhime/dynarmic) - interim recompiler and benchmark baseline
+- [dynarmic](https://github.com/merryhime/dynarmic) - ARM semantics reference and benchmark baseline
 - The Switch homebrew and emulation community for reverse engineering documentation
