@@ -1,0 +1,116 @@
+# Build and test, per CLAUDE.md "Build and test": every native preset on
+# three compilers, the Emscripten build (flags live in CMakeLists.txt per
+# DESIGN.md §24 - this file passes none of its own), and the web platform's
+# typecheck, unit tests and headless-Chromium boot e2e against the freshly
+# built core.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Pinned to the version DESIGN.md §24's flag spellings are verified
+  # against (and CMakeLists.txt's VOLAND_MIN_EMSCRIPTEN_VERSION). Bump both
+  # together.
+  EMSDK_VERSION: 6.0.9
+  NODE_VERSION: 24
+  PNPM_VERSION: 11
+
+jobs:
+  native:
+    name: native-noop (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux GCC,     os: ubuntu-latest,  cc: gcc }
+          - { name: macOS Clang,   os: macos-latest,   cc: clang }
+          - { name: Windows MSVC,  os: windows-latest, cc: cl }
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: seanmiddleditch/gha-setup-ninja@v6
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Configure
+        run: cmake --preset native-noop
+      - name: Build
+        run: cmake --build --preset native-noop
+      - name: Test
+        run: ctest --preset native-noop
+
+  web-core:
+    name: web (Emscripten ${{ env.EMSDK_VERSION }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: seanmiddleditch/gha-setup-ninja@v6
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+      - name: Configure
+        run: cmake --preset web
+      - name: Build
+        run: cmake --build --preset web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: switch-core-wasm
+          path: |
+            build/web/core/switch_core.js
+            build/web/core/switch_core.wasm
+          if-no-files-found: error
+
+  web-platform:
+    name: web platform
+    needs: web-core
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: platform/web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: platform/web/pnpm-lock.yaml
+      # The repository's lockfile is pnpm-lock.yaml; there is no
+      # package-lock.json for `npm ci` to install from.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm run typecheck
+      - name: Unit tests
+        run: pnpm test
+      # The step cpu.worker.ts's header comment describes as CI plumbing:
+      # place the core build output where Vite serves it as a static asset.
+      - name: Place core module in public/core
+        uses: actions/download-artifact@v4
+        with:
+          name: switch-core-wasm
+          path: platform/web/public/core
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Boot e2e
+        run: pnpm run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: platform/web/test-results
+          if-no-files-found: ignore
