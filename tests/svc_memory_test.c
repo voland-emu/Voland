@@ -103,6 +103,16 @@ static void bootstrap_minimal(Emulator *emu) {
   fixture_buffer_free(&exefs_image);
 }
 
+/* True when every byte of a mapped guest range reads back as zero. */
+static bool heap_range_is_zero(VMM_Context *vmm, uint64_t gva, uint64_t size) {
+  static uint8_t buffer[GRANULE];
+  if (size > sizeof(buffer) || !error_is_ok(vmm_read_block(vmm, gva, buffer, size))) return false;
+  for (uint64_t i = 0; i < size; i++) {
+    if (buffer[i] != 0) return false;
+  }
+  return true;
+}
+
 static void set_svc_args3(CPU_Register_File *regs, uint64_t x0, uint64_t x1, uint64_t x2) {
   regs->x[0] = x0;
   regs->x[1] = x1;
@@ -149,6 +159,14 @@ int main(void) {
   CHECK(byte == 0x42);
   CHECK_OK(vmm_write8(emu.vmm, heap.base + GRANULE, 0x99));
 
+  /* Fill the second granule with a pattern the regrow below must not
+   * hand back. */
+  {
+    static uint8_t pattern[GRANULE];
+    memset(pattern, 0xA5, sizeof(pattern));
+    CHECK_OK(vmm_write_block(emu.vmm, heap.base + GRANULE, pattern, GRANULE));
+  }
+
   /* Shrink back to one granule: the second half is released and
    * unmapped, the first is untouched. */
   set_svc_args3(regs, 0, GRANULE, 0);
@@ -160,6 +178,18 @@ int main(void) {
   VMM_Region_Info shrunk_info;
   CHECK_OK(vmm_query(emu.vmm, heap.base + GRANULE, &shrunk_info));
   CHECK(!shrunk_info.is_mapped);
+
+  /* Regrow: the same physical pages come back (cursor retraction), but
+   * Horizon hands out zeroed heap, so the old pattern must be gone. */
+  set_svc_args3(regs, 0, 2 * GRANULE, 0);
+  hle_on_svc(emu.cpu_state, 0x01, &emu.hle);
+  CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+  CHECK(heap_range_is_zero(emu.vmm, heap.base + GRANULE, GRANULE));
+  CHECK_OK(vmm_read8(emu.vmm, heap.base, &byte));
+  CHECK(byte == 0x42); /* the kept granule is not re-zeroed */
+  set_svc_args3(regs, 0, GRANULE, 0);
+  hle_on_svc(emu.cpu_state, 0x01, &emu.hle);
+  CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
 
   /* --- MapMemory / UnmapMemory --- */
 
@@ -324,6 +354,10 @@ int main(void) {
     CHECK_OK(page_allocator_allocate(&emu.pages, 1, &unrelated_pa));
     CHECK(emu.pages.free_run_count == 0);
 
+    static uint8_t pattern[GRANULE];
+    memset(pattern, 0x5C, sizeof(pattern));
+    CHECK_OK(vmm_write_block(emu.vmm, heap.base + GRANULE, pattern, GRANULE));
+
     set_svc_args3(regs, 0, GRANULE, 0);
     hle_on_svc(emu.cpu_state, 0x01, &emu.hle);
     CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
@@ -337,9 +371,11 @@ int main(void) {
     set_svc_args3(regs, 0, 2 * GRANULE, 0);
     hle_on_svc(emu.cpu_state, 0x01, &emu.hle);
     CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
-    /* Reused the freelist run rather than bumping the cursor. */
+    /* Reused the freelist run rather than bumping the cursor... */
     CHECK(emu.pages.used_bytes == used_before_regrow);
     CHECK(emu.pages.free_run_count == 0);
+    /* ...and the reused pages are zeroed, not the guest's old bytes. */
+    CHECK(heap_range_is_zero(emu.vmm, heap.base + GRANULE, GRANULE));
 
     CHECK_OK(page_allocator_free(&emu.pages, unrelated_pa, 1));
   }

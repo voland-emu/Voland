@@ -1,7 +1,7 @@
 # Build and test, per CLAUDE.md "Build and test": every native preset on
 # three compilers, the Emscripten build (flags live in CMakeLists.txt per
 # DESIGN.md §24 - this file passes none of its own), and the web platform's
-# typecheck, unit tests and headless-Chromium boot e2e against the freshly
+# typecheck, unit tests and the Chromium/Firefox/WebKit boot e2e against the freshly
 # built core.
 name: CI
 
@@ -104,8 +104,11 @@ jobs:
         with:
           name: switch-core-wasm
           path: platform/web/public/core
-      - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
+      # Chromium, Firefox and WebKit: Safari is why the core is wasm32
+      # (DESIGN.md §16 "Browser requirements"), so every engine asserts the
+      # 65535-page allocation.
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
       - name: Boot e2e
         run: pnpm run e2e
       - uses: actions/upload-artifact@v4

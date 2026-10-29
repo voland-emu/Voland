@@ -63,7 +63,8 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
     return;
   }
 
-  const layoutPtr = core._layout_get_ffi();
+  // Unsigned: the i32 comes back signed for addresses at or above 2 GiB.
+  const layoutPtr = core._layout_get_ffi() >>> 0;
   const layout = readMemoryLayout(memory, layoutPtr);
   const layoutMsg: CPUToMainMessage = { type: "layout", layout };
   self.postMessage(layoutMsg);

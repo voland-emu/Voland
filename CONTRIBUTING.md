@@ -39,7 +39,7 @@ Minimum tool versions are tracked in [`global.json`](global.json):
 | CMake | ≥3.24 |
 | Ninja | ≥1.11 |
 | Clang | ≥16 |
-| Emscripten (emsdk) | ≥6.0.9 — the version the §24 flag spellings (`-m64`, `-pthread`) are verified against; older releases are unsupported and CMake refuses them |
+| Emscripten (emsdk) | ≥6.0.9 — the version the §24 flag spellings (`-pthread`, the wasm32 `INITIAL_MEMORY`) are verified against; older releases are unsupported and CMake refuses them |
 | Node.js | ≥22.6 (required for `--experimental-strip-types`, used by `npm run test`) |
 | pnpm | ≥9 |
 
@@ -82,12 +82,12 @@ npm install
 npm run typecheck   # tsc --noEmit
 npm run test        # unit tests (node --test), no browser needed
 npm run build        # production build
-npm run e2e          # Playwright, headless Chromium: boots the built app,
+npm run e2e          # Playwright, Chromium + Firefox + WebKit: boots the built app,
                       # asserts crossOriginIsolated, asserts the full
-                      # ~5.25GiB shared-memory allocation succeeds
+                      # ~4GiB shared-memory allocation succeeds
 ```
 
-`npm run e2e` needs Chromium once: `npx playwright install chromium`.
+`npm run e2e` needs the three engines once: `npx playwright install chromium firefox webkit`.
 
 ### What ships with a change
 

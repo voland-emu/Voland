@@ -75,6 +75,9 @@ Error page_allocator_init_guest_ram(Page_Allocator *out);
  * RESULT_INVALID_ARGUMENT for NULL args or page_count == 0;
  * RESULT_OUT_OF_MEMORY when no freelist run fits and fewer pages remain
  * ahead of the cursor than requested (the allocator is unchanged).
+ * Commits the returned run through layout_guest_ram_commit() (§4: native
+ * reserves guest RAM without committing it); RESULT_OUT_OF_MEMORY,
+ * allocator unchanged, if that fails.
  * Contents are NOT zeroed: the caller that maps the pages decides
  * (bootstrap zeroes .bss, stack and TLS explicitly; a reused freed run may
  * still hold a previous owner's bytes). */

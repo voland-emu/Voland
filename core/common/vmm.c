@@ -24,8 +24,8 @@
 
 _Static_assert(VMM_L1_TABLE_BYTES == LAYOUT_PAGE_TABLE_L1_SIZE,
                "vmm L1 geometry must match the layout's page_table_l1 region (§4/§5)");
-_Static_assert(sizeof(void *) == sizeof(uint64_t),
-               "PTEs store host pointers in bits 63..12; a 64-bit host is required");
+_Static_assert(sizeof(void *) <= sizeof(uint64_t),
+               "PTEs store host pointers in bits 63..12; a pointer must fit in 64 bits");
 
 /* L2 tables are cache-line aligned. The arena has room for one extra
  * alignment's worth of padding so the last of VMM_L2_TABLE_CAPACITY

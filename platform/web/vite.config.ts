@@ -11,7 +11,7 @@ const alias = {
 };
 
 /**
- * Cross-origin isolation is mandatory - the shared memory64 WebAssembly.
+ * Cross-origin isolation is mandatory - the shared wasm32 WebAssembly.
  * Memory (§4) is gated behind COOP + COEP. See docs/DESIGN.md section 16
  * ("Required HTTP headers"). Vite's preview and dev servers both need
  * these headers or the app fails at boot with `!crossOriginIsolated`.

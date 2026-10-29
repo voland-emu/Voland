@@ -6,9 +6,11 @@
  * the real core functions take an `Emulator*` the JS side has no way to
  * name; each wrapper operates on the module-global instance instead.
  *
- * wasm64 (`-m64`, §24) means every pointer-or-uint64-typed export
- * exchanges `bigint`, never `number`, at the WASM boundary - i64 crosses
- * the JS boundary as BigInt, which is mandatory under wasm64.
+ * wasm32 (v3.29, §4/§24): pointers are i32 and cross as `number`;
+ * uint64_t values (guest registers, cycle budgets) are still i64 and cross
+ * as `bigint` (WASM_BIGINT is on by default). A raw i32 export result is
+ * signed, so a pointer at or above 2 GiB comes back negative: callers
+ * normalise with `>>> 0` (see cpu.worker.ts's layout read).
  */
 
 export interface SwitchCoreExports {
@@ -17,7 +19,7 @@ export interface SwitchCoreExports {
   readonly _emulator_run_ffi:     (cycleBudget: bigint) => number; /* CPU_ExitReason */
   readonly _emulator_step_ffi:    () => number;                    /* CPU_ExitReason */
 
-  readonly _layout_get_ffi:      () => bigint; /* Memory_Layout* in linear memory */
+  readonly _layout_get_ffi:      () => number; /* Memory_Layout* in linear memory */
   readonly _cpu_backend_id_ffi:  () => number; /* CpuBackendId */
 
   readonly _cpu_get_reg_ffi: (index: number) => bigint;
@@ -28,7 +30,7 @@ export interface SwitchCoreExports {
 /* Mirrors the #if ladder in core/stubs/wasm_entry.c's cpu_backend_id_ffi -
  * CPU_BACKEND is a CMake configure-time choice, never a runtime one, so
  * this sidesteps marshalling the backend's `name`/`version` C strings
- * across the wasm64 FFI boundary for a value fixed at build time. */
+ * across the FFI boundary for a value fixed at build time. */
 export const enum CpuBackendId {
   Noop = 0,
   Interpreter = 1,

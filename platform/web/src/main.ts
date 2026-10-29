@@ -14,20 +14,9 @@
 import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
 import type { MemoryLayout } from "@bindings/layout";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
-import { publishBootMilestone } from "./e2e-hooks";
+import { publishBootMilestone, publishLayoutMilestone } from "./e2e-hooks";
 import { appendLogLine, setStatus } from "./log";
-
-/**
- * Total shared linear memory: guest RAM + every layout.h region +
- * Emscripten's own data/stack/heap (~5.25GiB). Fixed at boot -
- * `initial === maximum`, growth disabled, so views never detach (§4).
- * This MUST equal CMakeLists.txt's INITIAL_MEMORY in bytes (with growth
- * disabled it is also the maximum; there is no separate MAXIMUM_MEMORY)
- * (5_637_144_576) or the core module fails to instantiate.
- */
-const WASM_PAGE_BYTES = 65_536n;
-const TOTAL_MEMORY_BYTES = 5_637_144_576n; // ~5.25GiB
-const TOTAL_MEMORY_PAGES = TOTAL_MEMORY_BYTES / WASM_PAGE_BYTES; // 86016n
+import { createSharedMemory, TOTAL_MEMORY_PAGES } from "./memory";
 
 const WORKER_READY_TIMEOUT_MS = 10_000;
 
@@ -57,35 +46,9 @@ async function reloadOnceForCrossOriginIsolation(): Promise<boolean> {
   return true;
 }
 
-/**
- * lib.dom.d.ts's `WebAssembly.MemoryDescriptor` doesn't know about the
- * memory64 shape yet: `initial`/`maximum` are BigInt page counts, not
- * Number, once `address: "i64"` is present.
- */
-interface Memory64Descriptor {
-  readonly initial: bigint;
-  readonly maximum: bigint;
-  readonly shared: true;
-  readonly address: "i64";
-}
-
 function allocateSharedMemory(): WebAssembly.Memory | null {
-  // Verified directly against this environment's V8 and against
-  // Emscripten's own -m64 (wasm64) glue output: both use `address: "i64"`
-  // with BigInt page counts, NOT `index: "i64"` with Number page counts.
-  // The latter is silently accepted as an unrecognized property and falls
-  // back to an ordinary 32-bit memory, which then throws RangeError the
-  // moment page counts exceed the wasm32 cap of 65536 pages (4GiB) -
-  // exactly this case. (docs/DESIGN.md's own §16 example uses `index`;
-  // that's stale relative to what actually shipped - do not copy it.)
-  const descriptor: Memory64Descriptor = {
-    initial: TOTAL_MEMORY_PAGES,
-    maximum: TOTAL_MEMORY_PAGES,
-    shared: true,
-    address: "i64",
-  };
   try {
-    return new WebAssembly.Memory(descriptor as unknown as WebAssembly.MemoryDescriptor);
+    return createSharedMemory();
   } catch (e) {
     appendLogLine("error", `WebAssembly.Memory allocation failed: ${(e as Error).message}`);
     return null;
@@ -164,11 +127,11 @@ async function boot(): Promise<BootResult | null> {
    * (§4). No separate SharedArrayBuffers. */
   const memory = allocateSharedMemory();
   if (!memory) {
-    fatal("Could not allocate emulator memory (~5.25GiB). Your browser or " +
+    fatal("Could not allocate emulator memory (~4GiB). Your browser or " +
           "device limits shared memory; use a native build.");
     return null;
   }
-  appendLogLine("info", `allocated shared memory: ${TOTAL_MEMORY_PAGES} pages (~5.25GiB)`);
+  appendLogLine("info", `allocated shared memory: ${TOTAL_MEMORY_PAGES} pages (~4GiB)`);
   publishBootMilestone(memory);
 
   const canvas = document.getElementById("game") as HTMLCanvasElement | null;
@@ -202,6 +165,7 @@ async function boot(): Promise<BootResult | null> {
       if (msg.type === "layout") {
         layout = msg.layout;
         appendLogLine("info", `layout handshake: guestRamBase=0x${layout.guestRamBase.toString(16)}`);
+        publishLayoutMilestone(layout.guestRamSize);
         gpuWorker.postMessage(
           { type: "init", canvas: offscreen, memory, layout } satisfies MainToGPUMessage,
           [offscreen],
@@ -260,7 +224,7 @@ async function boot(): Promise<BootResult | null> {
   return {
     adapterLabel: adapterLabel ?? "unavailable",
     cpuBackend:   cpuBackend   ?? "unavailable",
-    guestRamMiB:  finalLayout ? Number(finalLayout.guestRamSize / (1024n * 1024n)) : 0,
+    guestRamMiB:  finalLayout ? finalLayout.guestRamSize / (1024 * 1024) : 0,
   };
 }
 
