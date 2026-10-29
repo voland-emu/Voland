@@ -16,6 +16,17 @@ void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
   context->process = process;
   context->pages = pages;
   context->svc_call_count = 0;
+  /* Unbound until the owner binds it (emulator.c binds sm's object);
+   * ConnectToNamedPort on an unbound object answers NOT_IMPLEMENTED
+   * through ipc_dispatch rather than crashing. */
+  context->sm_object = (Service_Object){.interface = NULL, .instance = NULL};
+  hle_reset_process_state(context);
+}
+
+void hle_reset_process_state(HLE_Context *context)
+{
+  SWITCH_ASSERT_ALWAYS(context != NULL, "hle_reset_process_state: context is NULL");
+  ipc_session_table_init(&context->sessions);
 }
 
 static const char *svc_name(uint32_t swi)
@@ -54,6 +65,8 @@ static const char *svc_name(uint32_t swi)
     return "UnmapSharedMemory";
   case 0x15:
     return "CreateTransferMemory";
+  case 0x16:
+    return "CloseHandle";
   case 0x18:
     return "WaitSynchronization";
   case 0x19:
@@ -73,7 +86,7 @@ static const char *svc_name(uint32_t swi)
   case 0x22:
     return "SendSyncRequestWithUserBuffer";
   case 0x26:
-    return "CloseHandle";
+    return "Break";
   case 0x29:
     return "GetInfo";
   default:
@@ -122,14 +135,14 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
   case 0x06:
     hle_svc_query_memory(context, cpu_state);
     break;
+  case 0x16:
+    hle_svc_close_handle(context, cpu_state);
+    break;
   case 0x1F:
     hle_svc_connect_to_named_port(context, cpu_state);
     break;
   case 0x21:
     hle_svc_send_sync_request(context, cpu_state);
-    break;
-  case 0x26:
-    hle_svc_close_handle(context, cpu_state);
     break;
   default:
     log_warn("[hle] SVC 0x%02x (%s) at PC 0x%016llx - unimplemented",

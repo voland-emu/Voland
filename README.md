@@ -4,7 +4,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development: **Phase 1 (Load & Memory)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 0 and most of Phase 1 have landed and pass CI natively and under Emscripten: the softmmu, decrypted-NCA and NSO loading with process bootstrap, TLS, and the memory SVCs. Next is the minimal IPC + `sm:` stub. Nothing executes guest code yet: the interpreter arrives in Phase 2, and the web JIT (now Voland's own ARM64→WASM translator, `wasm_jit`, since Ballistic's WASM backend fell through) is designed in [WASM_JIT.md](docs/WASM_JIT.md) and lands in Phase 5.
+> **Status:** Early development: **Phase 1 (Load & Memory)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 0 and most of Phase 1 have landed and pass CI natively and under Emscripten: the softmmu, decrypted-NCA and NSO loading with process bootstrap, TLS, the memory SVCs, and minimal IPC with an `sm:` stub. Next is the wasm32 memory model, then the input region and the encrypted-input error path. Nothing executes guest code yet: the interpreter arrives in Phase 2, and the web JIT (Voland's own ARM64→WASM translator, `wasm_jit`, designed in [WASM_JIT.md](docs/WASM_JIT.md)) lands in Phase 5.
 
 ---
 

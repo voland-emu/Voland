@@ -8,7 +8,7 @@
  * and SendAsyncRequestWithUserBuffer (0x23) stay HLE_RESULT_NOT_IMPLEMENTED
  * in hle.c's dispatch table - they exist so a reply can land in a buffer
  * other than the caller's TLS block, which nothing in Phase 1 needs.
- * ReplyAndReceive (0x27) likewise: it is the SERVER side of a session
+ * ReplyAndReceive (0x43) likewise: it is the SERVER side of a session
  * (used by a process that itself registered a service and now waits for
  * requests on it) - Voland has no second guest process playing that
  * role; every "service" here is a host-side C call wired directly into
@@ -17,13 +17,11 @@
  * AcceptSession path belong against that same reasoning: redirect to
  * sm.h's header comment.
  *
- * Register ABI. Standard Horizon SVC convention (verify against libnx's
- * svc.s/svc.h before this lands, same as svc_memory.h's own note): W0 is
- * always the Result; an out-pointer C parameter is never itself sent to
- * the kernel, so the first real scalar argument occupies whichever
- * register the AAPCS would have given it, and an out VALUE the C
- * signature returns through a pointer comes back in W1 (W2, ... in C
- * param order) for the stub to write through that pointer.
+ * Register ABI, verified against libnx's svc.s (b156b47): W0 is always
+ * the Result; an out-pointer C parameter is never itself sent to the
+ * kernel (libnx's stub spills X0 to its own stack and stores W1 through
+ * it after the SVC returns), so an out VALUE comes back in W1. SVC ids:
+ * ConnectToNamedPort 0x1F, SendSyncRequest 0x21, CloseHandle 0x16.
  *
  *   ConnectToNamedPort  C: Result(Handle* handle_out, const char* name)
  *                       in:  X1 = name (a GUEST address; handle_out
@@ -44,23 +42,32 @@
  *                       in:  X0 = handle
  *                       out: W0 = Result
  *
- * ConnectToNamedPort's name scope: Voland accepts exactly "sm:" (up to 11
- * bytes + NUL, switchbrew's documented named-port name limit; read via
- * vmm_read_block, never a raw pointer per CLAUDE.md rule 3). Every other
- * named port is kernel/sysmodule-internal on real Horizon and no
- * application-facing title connects to one directly; a name other than
- * "sm:" is RESULT_NOT_FOUND, matching real kernel behaviour for an
- * unregistered port.
+ * ConnectToNamedPort's name scope: Voland accepts exactly "sm:". The
+ * name is read from guest memory one byte at a time up to its NUL (never
+ * a raw pointer, CLAUDE.md rule 3), so a name that ends just before an
+ * unmapped page reads cleanly; a byte that faults is
+ * HLE_RESULT_INVALID_POINTER, and no NUL within 12 bytes (11 characters +
+ * NUL) is HLE_RESULT_OUT_OF_RANGE. Every other named port is
+ * kernel/sysmodule-internal on real Horizon and no application-facing
+ * title connects to one directly; a name other than "sm:" is
+ * HLE_RESULT_NOT_FOUND, the kernel's Result for an unregistered port.
+ * libnx's smInitialize retries on exactly that Result, so it must stay
+ * the kernel's NotFound.
  *
- * Session storage: ipc.h's IPC_Session_Table (the Phase 1 handle-table
- * stand-in - see that header's "KNOWN SIMPLIFICATION"). This file assumes
- * HLE_Context gains an `IPC_Session_Table sessions` field (hle.h change,
- * proposed alongside this header) and that `hle_context_init` is
- * followed by a new `ipc_session_table_init(&context->sessions)` call and
- * a one-time `hle_svc_register_sm(context)` (see sm.h) at the same point
- * process.h's bootstrap currently arms the main thread - both are
- * emulator_create()/emulator_load_program() wiring, not part of this
- * header, called out here so the integration isn't silently assumed.
+ * Session results: a full session table is HLE_RESULT_OUT_OF_SESSIONS,
+ * both for ConnectToNamedPort and for a response's out objects. If a
+ * response cannot be delivered (table exhausted part-way, or the write
+ * back to TLS faults), every session that response opened is closed
+ * again before the SVC returns. A Close message (libnx's serviceClose)
+ * marks the session's server end closed and writes no response; later
+ * requests on it return HLE_RESULT_CONNECTION_CLOSED, and CloseHandle
+ * still releases the handle.
+ *
+ * Session storage: HLE_Context::sessions (ipc.h's IPC_Session_Table, the
+ * Phase 1 handle-table stand-in - see that header's "KNOWN
+ * SIMPLIFICATION"), emptied by hle_context_init and on program unload by
+ * hle_reset_process_state (hle.h). The "sm:" port resolves to
+ * HLE_Context::sm_object, which emulator.c binds at emulator_create().
  */
 #ifndef SWITCH_HLE_KERNEL_SVC_IPC_H
 #define SWITCH_HLE_KERNEL_SVC_IPC_H

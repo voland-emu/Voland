@@ -1,123 +1,225 @@
 /**
  * core/hle/kernel/ipc unit test: HIPC+CMIF parse/write, ipc_dispatch's
  * bsearch, and the Phase 1 session table - all pure, no vmm/CPU backend
- * (ipc.h's design goal). Hand-builds raw command buffers the same way
- * ipc_response_write itself does, so a parse/write round trip here is
- * also a cross-check that the two agree on the wire format.
+ * (ipc.h's design goal).
+ *
+ * Two independent sources of truth, so the tests cannot simply agree with
+ * the implementation's own reading of the wire format:
+ *   - ipc_fixtures.h: byte-exact libnx request buffers and libnx's
+ *     response reader, written without ipc.h's constants.
+ *   - build_request below: synthetic requests for the edge cases libnx
+ *     never sends, built from ipc.h's named layout constants (the single
+ *     definition of the layout, shared with ipc.c).
  */
 #define CHECK_NAME "ipc_test"
 #include "check.h"
 
 #include "hle/hle.h"
 #include "hle/kernel/ipc.h"
+#include "ipc_fixtures.h"
 
 #include <string.h>
 
 #define BUF_BYTES TLS_IPC_COMMAND_BUFFER_BYTES
 
 static void write_u32_at(uint8_t *buf, uint32_t offset, uint32_t v) { memcpy(buf + offset, &v, 4); }
-static void write_u64_at(uint8_t *buf, uint32_t offset, uint64_t v) { memcpy(buf + offset, &v, 8); }
 
-/* Builds a request buffer matching ipc_request_parse's supported subset -
- * the same shape hle_svc_send_sync_request hands it in practice. */
-static void build_request(uint8_t *buf, uint32_t type, bool has_special, bool send_pid,
-                          uint64_t pid, uint32_t command_id, const void *payload,
-                          uint32_t payload_size) {
-  memset(buf, 0, BUF_BYTES);
-  uint32_t offset = 8;
-  uint32_t word1_extra = 0;
-  if (has_special) {
-    write_u32_at(buf, offset, send_pid ? 1u : 0u);
-    offset += 4;
-    if (send_pid) {
-      write_u64_at(buf, offset, pid);
-      offset += 8;
-    }
-    word1_extra = 1u << 31;
+static uint32_t align16(uint32_t value) { return (value + IPC_CMIF_ALIGN - 1u) & ~(IPC_CMIF_ALIGN - 1u); }
+
+/* A Request with an optional pid, sized the way libnx sizes one: the raw
+ * data section starts right after the pid and its word count includes
+ * the IPC_CMIF_PADDING_BYTES reserve. `extra_data_words` grows the
+ * declared section past the payload (to reach a near-full buffer). */
+static void build_request(uint8_t *buf, bool send_pid, uint64_t pid, uint32_t command_id,
+                          const void *payload, uint32_t payload_size, uint32_t extra_data_words) {
+  memset(buf, FIXTURE_FILL_BYTE, BUF_BYTES);
+  uint32_t offset = IPC_HIPC_HEADER_BYTES;
+  uint32_t word1_flags = 0;
+  if (send_pid) {
+    write_u32_at(buf, offset, IPC_HIPC_SEND_PID_BIT);
+    offset += IPC_HIPC_SPECIAL_HEADER_BYTES;
+    memcpy(buf + offset, &pid, sizeof(pid));
+    offset += IPC_HIPC_PID_BYTES;
+    word1_flags = IPC_HIPC_HAS_SPECIAL_HEADER_BIT;
   }
-  const uint32_t raw_offset = (offset + 15u) & ~15u;
-  const uint32_t cmif_bytes = 16u + payload_size;
-  write_u32_at(buf, raw_offset, 0x49434653u); /* "SFCI" */
-  write_u32_at(buf, raw_offset + 4, 0);        /* version */
-  write_u64_at(buf, raw_offset + 8, command_id);
-  if (payload_size > 0) memcpy(buf + raw_offset + 16, payload, payload_size);
+  const uint32_t cmif_offset = align16(offset);
+  write_u32_at(buf, cmif_offset + IPC_CMIF_MAGIC_OFFSET, IPC_CMIF_MAGIC_SFCI);
+  write_u32_at(buf, cmif_offset + IPC_CMIF_VERSION_OFFSET, 0);
+  write_u32_at(buf, cmif_offset + IPC_CMIF_COMMAND_ID_OFFSET, command_id);
+  write_u32_at(buf, cmif_offset + IPC_CMIF_TOKEN_OFFSET, 0);
+  if (payload_size > 0) memcpy(buf + cmif_offset + IPC_CMIF_HEADER_BYTES, payload, payload_size);
 
-  write_u32_at(buf, 0, type);
-  write_u32_at(buf, 4, ((cmif_bytes / 4u) & 0x3FFu) | word1_extra);
+  const uint32_t data_bytes = IPC_CMIF_PADDING_BYTES + IPC_CMIF_HEADER_BYTES + payload_size;
+  const uint32_t data_words =
+      (data_bytes + IPC_HIPC_DATA_WORD_BYTES - 1u) / IPC_HIPC_DATA_WORD_BYTES + extra_data_words;
+  write_u32_at(buf, 0, (uint32_t)IPC_MESSAGE_TYPE_REQUEST);
+  write_u32_at(buf, 4, (data_words & IPC_HIPC_NUM_DATA_WORDS_MASK) | word1_flags);
 }
 
-static void test_parse_basic_no_special_header(void) {
+static void set_word0(uint8_t *buf, uint32_t word0) { write_u32_at(buf, 0, word0); }
+
+/* --- parse: libnx fixtures --- */
+
+static void test_parse_libnx_register_client(void) {
   uint8_t buf[BUF_BYTES];
-  const uint8_t payload[8] = {'f', 's', 'p', '-', 's', 'r', 'v', 0};
-  build_request(buf, IPC_MESSAGE_TYPE_REQUEST, false, false, 0, 1, payload, sizeof(payload));
+  fixture_ipc_load(buf, &k_fixture_register_client);
 
   IPC_Request req;
   CHECK_OK(ipc_request_parse(buf, BUF_BYTES, &req));
+  CHECK(req.type == IPC_MESSAGE_TYPE_REQUEST);
+  CHECK(req.command_id == 0);
+  CHECK(req.has_pid);
+  /* libnx never writes the pid slot: whatever the guest left there comes
+   * through, which is why ipc.h marks it untrusted. */
+  CHECK(req.guest_pid == ((uint64_t)FIXTURE_FILL_WORD << 32 | FIXTURE_FILL_WORD));
+  CHECK(req.data == buf + FIXTURE_REGISTER_CLIENT_DATA_OFFSET);
+  CHECK(req.data_size == FIXTURE_REGISTER_CLIENT_DATA_END - FIXTURE_REGISTER_CLIENT_DATA_OFFSET);
+}
+
+static void test_parse_libnx_get_service(void) {
+  uint8_t buf[BUF_BYTES];
+  fixture_ipc_load(buf, &k_fixture_get_service_fsp);
+
+  IPC_Request req;
+  CHECK_OK(ipc_request_parse(buf, BUF_BYTES, &req));
+  CHECK(req.type == IPC_MESSAGE_TYPE_REQUEST);
   CHECK(req.command_id == 1);
   CHECK(!req.has_pid);
-  CHECK(req.data_size == sizeof(payload));
-  CHECK(memcmp(req.data, payload, sizeof(payload)) == 0);
+  CHECK(req.data == buf + FIXTURE_GET_SERVICE_DATA_OFFSET);
+  CHECK(req.data_size == FIXTURE_GET_SERVICE_DATA_END - FIXTURE_GET_SERVICE_DATA_OFFSET);
+  CHECK(memcmp(req.data, "fsp-srv", 8) == 0);
+}
+
+static void test_parse_libnx_close(void) {
+  uint8_t buf[BUF_BYTES];
+  fixture_ipc_load(buf, &k_fixture_close);
+
+  IPC_Request req;
+  CHECK_OK(ipc_request_parse(buf, BUF_BYTES, &req));
+  CHECK(req.type == IPC_MESSAGE_TYPE_CLOSE);
+  CHECK(req.data == NULL);
+  CHECK(req.data_size == 0);
+}
+
+static void test_parse_rejects_libnx_tipc(void) {
+  uint8_t buf[BUF_BYTES];
+  fixture_ipc_load(buf, &k_fixture_tipc_register_client);
+  IPC_Request req;
+  CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
+
+  set_word0(buf, (uint32_t)IPC_MESSAGE_TYPE_TIPC_CLOSE);
+  CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
+}
+
+/* --- parse: synthetic edge cases --- */
+
+static void test_parse_near_full_buffer(void) {
+  /* No special header: the data section starts at 8, so 62 words end
+   * exactly at the end of the 0x100-byte buffer. Measuring the section
+   * from the aligned CMIF header instead would reject this. */
+  uint8_t buf[BUF_BYTES];
+  const uint32_t max_words = (BUF_BYTES - IPC_HIPC_HEADER_BYTES) / IPC_HIPC_DATA_WORD_BYTES;
+  build_request(buf, false, 0, 7, NULL, 0, 0);
+  write_u32_at(buf, 4, max_words);
+
+  IPC_Request req;
+  CHECK_OK(ipc_request_parse(buf, BUF_BYTES, &req));
+  CHECK(req.command_id == 7);
+  CHECK(req.data == buf + align16(IPC_HIPC_HEADER_BYTES) + IPC_CMIF_HEADER_BYTES);
+  CHECK(req.data + req.data_size == buf + BUF_BYTES);
+
+  write_u32_at(buf, 4, max_words + 1u);
+  CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_MEMORY_FAULT);
+}
+
+static void test_parse_rejects_section_too_short_for_header(void) {
+  /* The smallest valid section runs from 8 to the end of the aligned
+   * header at 16..32 (6 words); one word fewer cuts the header short. */
+  uint8_t buf[BUF_BYTES];
+  build_request(buf, false, 0, 0, NULL, 0, 0);
+  const uint32_t words_to_header_end =
+      (align16(IPC_HIPC_HEADER_BYTES) + IPC_CMIF_HEADER_BYTES - IPC_HIPC_HEADER_BYTES) /
+      IPC_HIPC_DATA_WORD_BYTES;
+  write_u32_at(buf, 4, words_to_header_end);
+  IPC_Request req;
+  CHECK_OK(ipc_request_parse(buf, BUF_BYTES, &req));
+  CHECK(req.data_size == 0);
+
+  write_u32_at(buf, 4, words_to_header_end - 1u);
+  CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_MEMORY_FAULT);
 }
 
 static void test_parse_with_pid(void) {
   uint8_t buf[BUF_BYTES];
-  build_request(buf, IPC_MESSAGE_TYPE_REQUEST, true, true, 0xDEADBEEFull, 0, NULL, 0);
+  const uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  build_request(buf, true, 0xDEADBEEFull, 3, payload, sizeof(payload), 0);
 
   IPC_Request req;
   CHECK_OK(ipc_request_parse(buf, BUF_BYTES, &req));
-  CHECK(req.command_id == 0);
+  CHECK(req.command_id == 3);
   CHECK(req.has_pid);
-  CHECK(req.pid == 0xDEADBEEFull);
-  CHECK(req.data_size == 0);
+  CHECK(req.guest_pid == 0xDEADBEEFull);
+  CHECK(req.data_size >= sizeof(payload));
+  CHECK(memcmp(req.data, payload, sizeof(payload)) == 0);
 }
 
 static void test_parse_rejects_bad_buffer_size(void) {
   uint8_t buf[BUF_BYTES];
-  build_request(buf, IPC_MESSAGE_TYPE_REQUEST, false, false, 0, 0, NULL, 0);
+  build_request(buf, false, 0, 0, NULL, 0, 0);
   IPC_Request req;
   CHECK_CODE(ipc_request_parse(buf, BUF_BYTES - 1, &req), RESULT_INVALID_ARGUMENT);
   CHECK_CODE(ipc_request_parse(NULL, BUF_BYTES, &req), RESULT_INVALID_ARGUMENT);
 }
 
-static void test_parse_rejects_non_request_type(void) {
+static void test_parse_rejects_unsupported_cmif_types(void) {
+  const IPC_Message_Type rejected[] = {
+      IPC_MESSAGE_TYPE_INVALID,         IPC_MESSAGE_TYPE_LEGACY_REQUEST,
+      IPC_MESSAGE_TYPE_LEGACY_CONTROL,  IPC_MESSAGE_TYPE_CONTROL,
+      IPC_MESSAGE_TYPE_REQUEST_WITH_CONTEXT, IPC_MESSAGE_TYPE_CONTROL_WITH_CONTEXT,
+  };
   uint8_t buf[BUF_BYTES];
-  build_request(buf, IPC_MESSAGE_TYPE_CONTROL, false, false, 0, 0, NULL, 0);
   IPC_Request req;
-  CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
+  for (uint32_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+    build_request(buf, false, 0, 0, NULL, 0, 0);
+    set_word0(buf, (uint32_t)rejected[i]);
+    CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
+  }
 }
 
 static void test_parse_rejects_buffer_descriptors(void) {
+  const uint32_t shifts[] = {IPC_HIPC_NUM_X_SHIFT, IPC_HIPC_NUM_A_SHIFT, IPC_HIPC_NUM_B_SHIFT,
+                             IPC_HIPC_NUM_W_SHIFT};
   uint8_t buf[BUF_BYTES];
-  build_request(buf, IPC_MESSAGE_TYPE_REQUEST, false, false, 0, 0, NULL, 0);
-  /* Set num_a_descriptors = 1 (word0 bits 20-23) directly - the parser
-   * must reject on the count alone, before reading any descriptor. */
-  uint32_t word0;
-  memcpy(&word0, buf, 4);
-  word0 |= (1u << 20);
-  memcpy(buf, &word0, 4);
   IPC_Request req;
+  for (uint32_t i = 0; i < sizeof(shifts) / sizeof(shifts[0]); i++) {
+    build_request(buf, false, 0, 0, NULL, 0, 0);
+    /* The count alone must reject, before any descriptor is read. */
+    set_word0(buf, (uint32_t)IPC_MESSAGE_TYPE_REQUEST | (1u << shifts[i]));
+    CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
+  }
+
+  build_request(buf, false, 0, 0, NULL, 0, 0);
+  uint32_t word1;
+  memcpy(&word1, buf + 4, 4);
+  write_u32_at(buf, 4, word1 | (1u << IPC_HIPC_RECV_STATIC_MODE_SHIFT));
   CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
 }
 
-static void test_parse_rejects_request_move_handles(void) {
+static void test_parse_rejects_request_handles(void) {
+  const uint32_t shifts[] = {IPC_HIPC_NUM_COPY_HANDLES_SHIFT, IPC_HIPC_NUM_MOVE_HANDLES_SHIFT};
   uint8_t buf[BUF_BYTES];
-  build_request(buf, IPC_MESSAGE_TYPE_REQUEST, true, false, 0, 0, NULL, 0);
-  /* Special header word sits right after word0/word1; set move_handle_count
-   * (bits 5-8) to 1. */
-  uint32_t special;
-  memcpy(&special, buf + 8, 4);
-  special |= (1u << 5);
-  memcpy(buf + 8, &special, 4);
   IPC_Request req;
-  CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
+  for (uint32_t i = 0; i < sizeof(shifts) / sizeof(shifts[0]); i++) {
+    build_request(buf, true, 0, 0, NULL, 0, 0);
+    write_u32_at(buf, IPC_HIPC_HEADER_BYTES, IPC_HIPC_SEND_PID_BIT | (1u << shifts[i]));
+    CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
+  }
 }
 
 static void test_parse_rejects_bad_magic(void) {
   uint8_t buf[BUF_BYTES];
-  build_request(buf, IPC_MESSAGE_TYPE_REQUEST, false, false, 0, 0, NULL, 0);
-  /* No special header: raw data starts at align_up(8, 16) = 16, not 8 -
-   * see build_request. */
-  write_u32_at(buf, 16, 0xFFFFFFFFu); /* clobber the SFCI magic */
+  fixture_ipc_load(buf, &k_fixture_get_service_fsp);
+  write_u32_at(buf, align16(IPC_HIPC_HEADER_BYTES) + IPC_CMIF_MAGIC_OFFSET, 0xFFFFFFFFu);
   IPC_Request req;
   CHECK_CODE(ipc_request_parse(buf, BUF_BYTES, &req), RESULT_NOT_IMPLEMENTED);
 }
@@ -175,30 +277,31 @@ static void test_response_add_move_object_caps_at_max(void) {
   CHECK(res.out_object_count == IPC_MAX_OUT_OBJECTS);
 }
 
-/* --- ipc_response_write --- */
+/* --- ipc_response_write, read back the way libnx reads it --- */
 
 static void test_response_write_no_handles(void) {
   uint8_t buf[BUF_BYTES];
+  memset(buf, FIXTURE_FILL_BYTE, sizeof(buf));
   IPC_Response res;
   memset(&res, 0, sizeof(res));
-  res.result = HLE_RESULT_SUCCESS;
+  res.result = 0x0E15u; /* any non-success value: sm NotRegistered */
 
   CHECK_OK(ipc_response_write(buf, BUF_BYTES, &res, NULL, 0));
 
-  uint32_t word1;
-  memcpy(&word1, buf + 4, 4);
-  CHECK((word1 >> 31) == 0); /* no special header: no handles to carry */
-  const uint32_t raw_offset = (8u + 15u) & ~15u;
-  uint32_t magic;
-  memcpy(&magic, buf + raw_offset, 4);
-  CHECK(magic == 0x4F434653u); /* "SFCO" */
-  uint64_t result64;
-  memcpy(&result64, buf + raw_offset + 8, 8);
-  CHECK(result64 == HLE_RESULT_SUCCESS);
+  Fixture_Libnx_Response view;
+  CHECK(fixture_libnx_read_response(buf, &view));
+  CHECK(!view.has_special_header);
+  CHECK(view.num_move_handles == 0);
+  CHECK(view.cmif_offset == 0x10u);
+  CHECK(view.result == 0x0E15u);
+  /* The declared section starts where libnx's data_words does and covers
+   * the whole header. */
+  CHECK(view.data_words_offset + view.num_data_words * 4u >= view.cmif_offset + 16u);
 }
 
 static void test_response_write_one_handle(void) {
   uint8_t buf[BUF_BYTES];
+  memset(buf, FIXTURE_FILL_BYTE, sizeof(buf));
   IPC_Response res;
   memset(&res, 0, sizeof(res));
   res.result = HLE_RESULT_SUCCESS;
@@ -207,15 +310,16 @@ static void test_response_write_one_handle(void) {
 
   CHECK_OK(ipc_response_write(buf, BUF_BYTES, &res, &handle, 1));
 
-  uint32_t word1;
-  memcpy(&word1, buf + 4, 4);
-  CHECK((word1 >> 31) == 1);
-  uint32_t special;
-  memcpy(&special, buf + 8, 4);
-  CHECK(((special >> 5) & 0xFu) == 1); /* move_handle_count */
-  uint32_t written_handle;
-  memcpy(&written_handle, buf + 12, 4);
-  CHECK(written_handle == handle);
+  Fixture_Libnx_Response view;
+  CHECK(fixture_libnx_read_response(buf, &view));
+  CHECK(view.has_special_header);
+  CHECK(view.num_copy_handles == 0);
+  CHECK(view.num_move_handles == 1);
+  CHECK(view.move_handles[0] == handle);
+  CHECK(view.data_words_offset == 0x10u); /* after header, special header, one handle */
+  CHECK(view.cmif_offset == 0x10u);
+  CHECK(view.result == HLE_RESULT_SUCCESS);
+  CHECK(view.data_words_offset + view.num_data_words * 4u >= view.cmif_offset + 16u);
 }
 
 static void test_response_write_rejects_handle_count_mismatch(void) {
@@ -267,12 +371,17 @@ static void test_session_table_exhaustion(void) {
 }
 
 int main(void) {
-  test_parse_basic_no_special_header();
+  test_parse_libnx_register_client();
+  test_parse_libnx_get_service();
+  test_parse_libnx_close();
+  test_parse_rejects_libnx_tipc();
+  test_parse_near_full_buffer();
+  test_parse_rejects_section_too_short_for_header();
   test_parse_with_pid();
   test_parse_rejects_bad_buffer_size();
-  test_parse_rejects_non_request_type();
+  test_parse_rejects_unsupported_cmif_types();
   test_parse_rejects_buffer_descriptors();
-  test_parse_rejects_request_move_handles();
+  test_parse_rejects_request_handles();
   test_parse_rejects_bad_magic();
   test_dispatch_known_and_unknown_command();
   test_response_add_move_object_caps_at_max();

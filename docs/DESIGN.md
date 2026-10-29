@@ -406,6 +406,7 @@ typedef enum Result {
   RESULT_MEMORY_FAULT     = 6, // guest VA unmapped or permission denied (§5)
   RESULT_NOT_CONTIGUOUS   = 7, // vmm_guest_to_host across non-adjacent pages (§5)
   RESULT_ENCRYPTED_INPUT  = 8, // loader input is not pre-decrypted (§1.6, §12)
+  RESULT_ALREADY_EXISTS   = 9, // host-side registration under an existing key (sm, §12)
 } Result;
 
 typedef struct {
@@ -1313,6 +1314,8 @@ An IPC "call" a game makes to a service crosses three layers, and all three are 
 
 **CMIF (service protocol).** Inside the HIPC payload: `SFCI` magic + command ID inbound, `SFCO` + Result outbound. Sessions can be converted to **domains** — multiple service objects multiplexed over one session, requests addressed by object ID. Games use domains heavily; a session/domain split that arrives "later" arrives as a rewrite. Domain state (object table) lives on the session from day one, even while most services are stubs.
 
+**TIPC (deferred).** Firmware 12 added a second, lighter service protocol: the HIPC type field carries `16 + command id` (15 is Close) and there is no `SFCI` header. Nintendo's SDK reaches `sm:` over TIPC on 12.0+, so retail titles need it before Phase 4's first boot. libnx does not: it sends RegisterClient and GetServiceHandle over CMIF on every firmware and uses TIPC only for RegisterService, which Voland never implements (§25 Phase 1). The Phase 1 parser recognises TIPC and answers `NOT_IMPLEMENTED`; supporting it is a parser branch plus a second command table per TIPC-capable interface, not a redesign.
+
 **The C service-object pattern.** The C# references use classes; Voland's shape is one struct + a sorted command table per interface:
 
 ```c
@@ -1423,8 +1426,8 @@ void hle_on_svc(CPU_State* cpu_state, uint32_t swi, void* userdata) {
     // IPC
     case 0x1F: hle_svc_connect_to_named_port(context, cpu_state);  break;
     case 0x21: hle_svc_send_sync_request(context, cpu_state);      break;
-    // Handles / Info
-    case 0x26: hle_svc_close_handle(context, cpu_state);           break;
+    // Handles / Info (CloseHandle is 0x16; 0x26 is Break - libnx svc.s)
+    case 0x16: hle_svc_close_handle(context, cpu_state);           break;
     case 0x29: hle_svc_get_info(context, cpu_state);               break;
 
     default:
@@ -1442,15 +1445,18 @@ The table above is the boot-critical core, not an enumeration. Two entries are e
 
 ```c
 #define HLE_RESULT_SUCCESS               0x00000000
-#define HLE_RESULT_NOT_IMPLEMENTED       0xF601
-#define HLE_RESULT_INVALID_HANDLE        0xE401
-#define HLE_RESULT_INVALID_POINTER       0xCC01
-#define HLE_RESULT_OUT_OF_MEMORY         0xD001
-#define HLE_RESULT_NOT_FOUND             0xE002
-#define HLE_RESULT_ALREADY_EXISTS        0xFA02
-#define HLE_RESULT_INVALID_SIZE          0xCA01
-#define HLE_RESULT_INVALID_MEMORY_STATE  0xD401
-#define HLE_RESULT_INVALID_MEMORY_RANGE  0xDC01
+#define HLE_RESULT_NOT_IMPLEMENTED       0x4201  // KernelError_NotImplemented=33
+#define HLE_RESULT_INVALID_HANDLE        0xE401  // InvalidHandle=114
+#define HLE_RESULT_INVALID_POINTER       0xCC01  // InvalidAddress=102
+#define HLE_RESULT_OUT_OF_MEMORY         0xD001  // OutOfMemory=104
+#define HLE_RESULT_NOT_FOUND             0xF201  // NotFound=121
+#define HLE_RESULT_ALREADY_EXISTS        0xF401  // AlreadyExists=122
+#define HLE_RESULT_INVALID_SIZE          0xCA01  // InvalidSize=101
+#define HLE_RESULT_INVALID_MEMORY_STATE  0xD401  // InvalidMemoryState=106
+#define HLE_RESULT_INVALID_MEMORY_RANGE  0xDC01  // InvalidMemoryRange=110
+#define HLE_RESULT_OUT_OF_SESSIONS       0x0E01  // OutOfSessions=7
+#define HLE_RESULT_OUT_OF_RANGE          0xEE01  // OutOfRange=119
+#define HLE_RESULT_CONNECTION_CLOSED     0xF601  // ConnectionClosed=123
 
 // Horizon Result encoding: (description << 9) | module. Module 1 is the
 // kernel — the constants above are genuine kernel results, e.g.
@@ -1460,6 +1466,8 @@ The table above is the boot-critical core, not an enumeration. Two entries are e
 ```
 
 **Deviation, memory SVCs (§25 checkbox 5):** `HLE_RESULT_OUT_OF_MEMORY` was `0x1A01` from v3.0 through the Phase 0 stub — a value with no corresponding `KernelError_*` entry — because nothing had ever actually returned it to a guest register. The memory SVCs (SetHeapSize/MapMemory/UnmapMemory/QueryMemory, `core/hle/kernel/svc_memory.{h,c}`) are the first code to do so, so it was corrected against libnx's `result.h` (`KernelError_OutOfMemory=104`) in the same change, along with three new constants those SVCs need. Two further simplifications are documented in `svc_memory.h` itself rather than repeated here: `UnmapMemory` requires an exact match against a recorded `MapMemory` call (no partial unmap — real Horizon allows it, but the only real-world caller, libnx's `threadCreate`/`threadClose`, always unmaps the exact range it mapped); and `QueryMemory`'s `MemoryInfo.type`/`attr` model only the subset of Horizon's ~30 memory types reachable by a Phase 1 title (code/heap/stack/TLS/unmapped) rather than the full enum, since the rest describe kernel objects (transfer memory, IPC buffers, module code) no SVC before Phase 5+ can create.
+
+**Deviation, IPC SVCs (§25 Phase 1 "Minimal IPC + sm: stub", v3.30):** three more constants had never reached a guest and were wrong in the same way — `NOT_IMPLEMENTED` was `0xF601` (that is ConnectionClosed, description 123), `NOT_FOUND` `0xE002` and `ALREADY_EXISTS` `0xFA02` (both module 2, FS). The IPC SVCs return them, so all three were corrected against libnx's `result.h`. `NOT_FOUND` matters beyond correctness: libnx's `smInitialize` retries `ConnectToNamedPort("sm:")` for as long as it returns exactly the kernel's NotFound. The dispatch table above also had CloseHandle at `0x26` (Break); it is `0x16`.
 
 ### Services implementation priority
 
@@ -2536,7 +2544,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [x] **TLS allocation + tpidrro_el0 plumbing** — IPC's transport; required before any sm: stub answers a real request. *v3.26: `tls.{h,c}` is the per-process TLS page allocator (0x200 blocks, pages mapped via vmm on demand); `thread.{h,c}` owns a thread's `CPU_State` + block and arms `tpidrro_el0` once through `CPU_SYSREG_TPIDRRO_EL0`; the bootstrap's main thread draws from the same allocator. The IPC layer's reading of the block (`TLS_IPC_COMMAND_BUFFER_BYTES`) belongs to the "Minimal IPC + sm: stub" item; the CreateThread SVC that calls `thread_create` is Phase 2.*
 - [x] Load executable sections into guest memory *through vmm mappings*
 - [x] **Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers** — the checkbox's four SVCs (UnmapMemory is MapMemory's inverse, named alongside the other three in §12's priority list). *v3.27: `hle/kernel/svc_memory.{h,c}`; register ABI and MapMemory/UnmapMemory semantics verified against libnx's `svc.s`/`svc.h`/`thread.c` rather than assumed (SetHeapSize's size arrives in X1, not X0). Two scoped-down simplifications, documented in `svc_memory.h` and the "Deviation" note after §12's HLE result type: UnmapMemory requires an exact match against a recorded MapMemory call (no partial unmap); QueryMemory's `MemoryInfo.type`/`attr` model only the address-space regions reachable by a Phase 1 title, not Horizon's full ~30-value enum. `page_allocator.h` gained the release path (a small freelist) it had already anticipated needing for SetHeapSize's shrink and process teardown. Full account in the Changelog v3.26 → v3.27 entry.*
-- [ ] Minimal IPC + sm: stub
+- [x] **Minimal IPC + sm: stub.** *v3.30: HIPC/CMIF framing, service-object dispatch and a Phase 1 session table in `hle/kernel/ipc.{h,c}`; ConnectToNamedPort (0x1F), SendSyncRequest (0x21) and CloseHandle (0x16) in `hle/kernel/svc_ipc.{h,c}` (split from `ipc` like `svc_memory` from `vmm`); `hle/services/sm/sm.{h,c}` answers RegisterClient (explicit stub) and GetServiceHandle against a host-side registry. Wire format verified against libnx's `sf/hipc.h`/`sf/cmif.h`, and tested with libnx's request bytes and libnx's response-reading logic. Close messages are accepted; TIPC is recognised and deferred (§12). Sessions are per-process: unload empties the table. Full account in the Changelog v3.29 → v3.30 entry.*
 - [ ] **wasm32 memory model** (v3.29, §4): guest RAM sized to the application pool plus the HLE carve-out; `-m64` dropped and `INITIAL_MEMORY` set to 65535 pages (§24); `main.ts` and the bindings on Number pointers; native guest RAM reserved without committing; Firefox and WebKit Playwright projects, with e2e asserting the allocation per engine
 - [ ] Input region + seqlock writer/reader (§18; v3.29 layout with motion and touch, output region reserved)
 - [ ] User-facing error path for encrypted input → dumping guide
@@ -2690,9 +2698,19 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.29.0*
+*Document version: 3.30.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.29 → v3.30 (summary)
+
+- **§25 Phase 1 "Minimal IPC + sm: stub" closed.** `core/hle/kernel/ipc.{h,c}`: HIPC parsing and writing, CMIF framing, the §12 service-object dispatch pattern (`Service_Object`, `Service_Command`, `Service_Interface`, binary search over a sorted command table), and `IPC_Session_Table`, a Phase 1 stand-in for the per-process handle table (process.h, Phase 2) that hands out session handles only and is deleted, not migrated, when that table lands. `core/hle/kernel/svc_ipc.{h,c}`: ConnectToNamedPort (accepts only `"sm:"`), SendSyncRequest (the command buffer round-trips through a local copy via `vmm_read_block`/`vmm_write_block`) and CloseHandle. `core/hle/services/sm/sm.{h,c}`: RegisterClient (explicit stub) and GetServiceHandle against a host-side registry filled by `sm_register_service()`. RegisterService/UnregisterService are not implemented: in Voland's single-guest-process model every service is a host-side C object, so nothing could legitimately call them. `HLE_Context` gains the session table and the `Service_Object` the `"sm:"` port resolves to; `hle_reset_process_state()` empties the table on program unload. §2's tree lists `svc_ipc.{h,c}`.
+- **Wire format verified against libnx** (`sf/hipc.h`, `sf/cmif.h`, `sf/tipc.h`, `sf/service.h`, `services/sm.c`, `kernel/svc.s` at switchbrew/libnx `b156b47`), the client every homebrew title links. The raw data section starts right after the last descriptor and its word count includes the padding in front of the 16-byte-aligned CMIF header; the CMIF header is four `u32`s (magic, version, command id or Result, token); a response's HIPC type is written as 0, which libnx never reads. Every field position and mask is a named constant in `ipc.h`, shared with the tests.
+- **libnx message handling:** `serviceClose` sends a CMIF Close through SendSyncRequest before `svcCloseHandle`; Close marks the session's server end closed, writes nothing back, and later requests on it return ConnectionClosed. TIPC is recognised and deferred (§12 "TIPC"). A request's pid field is recorded as untrusted guest bytes (`IPC_Request::guest_pid`): libnx leaves it uninitialised and the real kernel overwrites it, and Voland has no process id before Phase 2.
+- **No leaked sessions:** sessions opened for a response's out objects are closed again if the response cannot be delivered (table exhausted, or the TLS write-back faults); a full table is OutOfSessions; program unload empties the table, so one program's handles never reach the next.
+- **ConnectToNamedPort** reads the port name a byte at a time up to its NUL, bounded at 12 bytes (OutOfRange past that), so a name that ends just before an unmapped page does not fault.
+- **§12 corrections:** CloseHandle is SVC `0x16`, not `0x26` (Break); `HLE_RESULT_NOT_IMPLEMENTED`, `NOT_FOUND` and `ALREADY_EXISTS` corrected against libnx `result.h`, and OUT_OF_SESSIONS, OUT_OF_RANGE and CONNECTION_CLOSED added (deviation note after §12's HLE result type). §3's `Result` enum gains `RESULT_ALREADY_EXISTS`, used by `sm_register_service`.
+- **Tests:** `tests/ipc_fixtures.h` holds libnx's request bytes for RegisterClient, GetServiceHandle, Close and TIPC RegisterClient, traced by hand from libnx's builders with every byte libnx leaves unwritten filled with `0xAA`, plus libnx's response-reading logic, both written without `ipc.h`'s constants. `tests/ipc_test.c` (parse/write/dispatch/session table, including a section that ends exactly at the end of the buffer), `tests/sm_test.c`, and `tests/svc_ipc_test.c` (the SVC path through `emulator_load_program`, including 40 load/unload cycles and a TLS write-back fault), asserting guest-visible Results against literal values derived from libnx.
 
 ### Changelog v3.28 → v3.29 (summary)
 
