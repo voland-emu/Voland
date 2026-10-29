@@ -1140,6 +1140,7 @@ Summary; details and status are in WASM_JIT.md J11. The baseline is wasm32 with 
 - **Tail calls** (WASM 3.0) are not used in tier 1. They are the mechanism for tier-2 linking between regions.
 - **JSPI** is not needed: nothing blocks inside WASM (§7).
 - The **JIT interface proposal** is a watch item.
+- **Compilation hints** (`metadata.code.compilation_priority`) are a watch item too: they would mark region functions for early optimization. V8 has them as experimental, off by default (WASM_JIT.md J11). With or without them, regions reach the engine's optimizing tier through real execution only. Running them on synthetic input to warm the engine up is rejected, because a region writes the running guest's memory (WASM_JIT.md J13, J18).
 
 ### Ideas inherited from Ballistic
 
@@ -1260,7 +1261,18 @@ flowchart TD
 
 ### Persistence reality
 
-A compiled `WebAssembly.Module` **cannot** be persisted, only its bytes; Chrome removed IndexedDB module caching years ago. Consequence, stated plainly: **the PTC eliminates translation cost (ARM→WASM emission), not compile cost (`WebAssembly.compile`).** Every session pays baseline compilation of cached bytes. Baseline compile throughput is tens of MB/s of wasm, so this is acceptable. Warm sessions skip translation for every region already in the cache, and still compile each batch as its regions become hot. That is why AOT pre-translation (Phase 7) is more valuable here than it would be natively: it front-loads translation, which is the part the cache can save.
+Voland cannot persist a compiled `WebAssembly.Module`, only its bytes; Chrome removed IndexedDB module caching years ago. Consequence, stated plainly: **the PTC eliminates translation cost (ARM→WASM emission), not compile cost (`WebAssembly.compile`).** Every session pays baseline compilation of cached bytes. Baseline compile throughput is tens of MB/s of wasm, so this is acceptable. Warm sessions skip translation for every region already in the cache, and still compile each batch as its regions become hot. That is why AOT pre-translation (Phase 7) is more valuable here than it would be natively: it front-loads translation, which is the part the cache can save.
+
+**What an engine can persist that Voland can't** (v3.32, read from source in October 2026). Chrome caches the optimized code of a module compiled by *streaming* from a URL:
+- As the module tiers up, V8 offers its compiled code in chunks (`src/wasm/module-compiler.cc` at `b7d0728`).
+- Blink stores it with the response, under a SHA-256 of the module bytes (`v8_wasm_response_extensions.cc`).
+- The next streaming compile of the same URL and bytes starts from that code, with every function it held already optimized.
+
+It applies only to streamed responses that Blink gives a code-cache handler. So:
+- the core module, which streams (§16), can benefit;
+- region batches, compiled from bytes in memory, cannot (WASM_JIT.md J17 question 10).
+
+WebKit's streaming path has no such cache (`Source/WebCore/bindings/js/JSDOMGlobalObject.cpp`). Expect Safari to compile the core in full on every launch. Firefox is measured, not assumed (WASM_JIT.md J12). For region code, the statement above holds on every engine: the PTC saves translation, never compilation.
 
 The same agent-cluster rule that forces the compiler to be a dedicated worker also means compiled Modules can never be shared across tabs. Cross-tab sharing exists only at the byte level, which the OPFS PTC already is; there is nothing a SharedWorker could have added here.
 
@@ -1991,6 +2003,13 @@ The CPU Worker handles these between slices, so a message waits at most one slic
 
 Cache strategy unchanged from v2 (shell cache-first, `.wasm` aggressively cache-first, `/api/` network-only, rest network-first) with `addCrossOriginIsolationHeaders()` applied to every served response.
 
+**The core module streams, and that constrains how it is served** (v3.32). Emscripten's glue loads `switch_core.wasm` with `instantiateStreaming` when it can; this has to be confirmed on the first web build that serves the core.
+- Every engine rejects the stream unless the response is CORS-same-origin, has an OK status, and is typed `application/wasm`.
+- Chrome compares the whole `Content-Type` header, so `application/wasm; charset=utf-8` fails.
+- A rejected stream doesn't fail the boot. The glue falls back to compiling an ArrayBuffer, which silently loses Chrome's code cache (§11).
+
+So every server Voland documents (dev, e2e and self-hosting) sends exactly `Content-Type: application/wasm`, and the service worker's header injection preserves it. A check that fails the e2e on the glue's fallback warning belongs with this rule; it is not written yet. Whether Chrome keeps its code cache for a module this service worker serves from Cache Storage is open (WASM_JIT.md J17 question 10).
+
 ### Progressive enhancement
 
 Capability detection (`webGPU`, `opfs`, `crossOriginIsolated`, `showDirectoryPicker`, WebHID, WebNFC, wake lock, vibration) as in v2; hard requirements fail at boot, the rest degrade per-feature.
@@ -2685,7 +2704,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 | `wasm_jit` is a large, Voland-owned compiler effort | Medium–high for web perf | Medium | Tier 1 is direct translation over the predecoded records, with no compiler IR (§10); the browser's WASM tiers do register allocation and generic optimization. Coverage is incremental: untranslated instructions fall back to the interpreter, and per-form counters direct the work. The predecoded interpreter (§25 Phase 5) is a deliverable, so the web build works without the JIT. The shared generated decoder and Unicorn fuzzing exist from the Phase 2 interpreter, before the JIT starts. Contributor recruitment for it starts with Phase 5. |
 | Exact FP semantics (NaN fixups, emulated FMA) cost too much on FP-heavy titles | Medium | Medium | Measured per instruction form in Phase 5. The NaN fixup's common path is one compare. A relaxed-SIMD FMA path is gated on evidence that it fuses deterministically (WASM_JIT.md J11). Inexact opt-in modes are not offered (§3). Heavy titles fall back to the native-build recommendation, as in the softmmu row. |
 | Ballistic-x86 doesn't reach coverage, or its memory interface can't be reconciled with §5 | Low | Medium | Optional backend: desktop runs the predecoded interpreter, and the web build is the fast path on desktop too. Performance, not existence, is what's at stake. |
-| Per-session `WebAssembly.compile` of PTC bytes is too slow at launch for large titles | Low–medium | Low | Baseline compile is tens of MB/s, and compilation is already lazy: batches compile as their regions become hot (WASM_JIT.md J4.7), not in bulk at boot. AOT (Phase 7) shifts the balance further. |
+| Per-session `WebAssembly.compile` of PTC bytes is too slow at launch for large titles | Low–medium | Low | Baseline compile is tens of MB/s, and compilation is already lazy: batches compile as their regions become hot (WASM_JIT.md J4.7), not in bulk at boot. AOT (Phase 7) shifts the balance further. Separately, WebKit has no wasm code cache in its streaming path (§11), so the core itself compiles in full on every Safari launch; its cost is measured per engine (WASM_JIT.md J12). |
 | WebGPU rendering differences across the three implementations (Dawn / wgpu / WebKit) | Medium | Medium | WebGPU is Baseline (Jan 2026) and worker-context support is verified on all three engines (§13); remaining gaps are Firefox Linux/Android rollout and per-implementation rendering differences. Boot-time capability check; golden-image tests run per engine in CI. |
 | COEP `require-corp` breaks third-party assets | Medium | Medium | First-party assets only; documented for self-hosters; SW re-injects headers on cached responses (§16). |
 | SW COOP/COEP injection first-visit reload confuses users/hosters | Low | Medium | Guarded single-reload in boot (§16); deployment docs say "set real headers." |
@@ -2699,9 +2718,19 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.31.0*
+*Document version: 3.32.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.31 → v3.32 (summary)
+
+- **Engine warm-up (§10; WASM_JIT.md J11, J13, J18).** Regions reach the engine's optimizing tier through real execution. Prewarming, calling regions on synthetic input until the engine optimizes them, is rejected: a region reads and writes guest memory through the session's real page tables, so a synthetic run would corrupt guest state and break determinism (WASM_JIT.md C8). It would also mistrain the engine's profiling and tune against tier-up counters the engines don't specify. Compilation hints (`metadata.code.compilation_priority`) join J11 as a watch item. J13's tier-1 exit criteria are measured in steady state, with warm-up reported separately per engine, and J13 now separates `wasm_jit`'s tiers from the engine's.
+- **Engine compile and code caching, from source (§11, §16, §28; WASM_JIT.md J11, J12, J13, J17).** Read in October 2026: V8's `src/wasm/module-compiler.cc` at `b7d0728` and `src/flags/feature-flags.h`, Blink's `v8_wasm_response_extensions.cc`, and WebKit's `JSDOMGlobalObject.cpp`.
+  - V8 lists compilation hints as experimental and wide arithmetic as staged (15.7), both off by default; J11 records what hints would do.
+  - §11's "Persistence reality" is corrected: Chrome caches optimized code for streamed modules that have a code-cache handler, validated by a SHA-256 of the module bytes. That can serve the core, never region batches compiled from bytes. WebKit's streaming path has no such cache.
+  - §16 requires the core to be served as exactly `application/wasm`, because a rejected stream silently falls back to an ArrayBuffer compile. The e2e check for that is noted, not written.
+  - J12 gains per-engine compile measurements (core relaunch, batch instantiation, region warm-up), and J13 the Node flags that separate V8's tiers.
+  - J17 gains question 10 (Chrome's code cache for service-worker responses, with a test method) and question 11 (whether JSC moves compile work into the CPU worker's synchronous instantiation).
 
 ### Changelog v3.30 → v3.31 (summary)
 

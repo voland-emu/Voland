@@ -663,6 +663,13 @@ DESIGN.md §11 and §15 already fix the storage (OPFS for bytes, IndexedDB for m
 | Relaxed SIMD | not used for anything ARM defines exactly: `relaxed_madd` may or may not fuse, depending on the host | — | — |
 | JSPI | not needed: nothing in Voland blocks inside WASM (DESIGN.md §7) | — | — |
 | JIT interface proposal (WebAssembly/jit-interface) | watch item; until it ships, late linking (memory and table imports) is the standard technique | — | — |
+| Compilation hints (`metadata.code.compilation_priority`, WebAssembly/compilation-hints) | watch item: would mark every region function for early optimization, since regions are hot by construction (J4.7); see below | none: engines without support ignore the section | no |
+
+**Engine status, read from source in October 2026.** In V8, wide arithmetic is *staged* (since 15.7): off by default and enabled by `--wasm-staging`. On shipping Chrome the boot probe therefore fails, and the baseline lowering is the common path. Compilation hints are *experimental* in V8, the earliest stage and off by default (`src/flags/feature-flags.h`).
+
+With the flag on, V8 (`src/wasm/module-compiler.cc` at `b7d0728`) gives a hinted function two things: eager Liftoff code, and a TurboFan compile queued in the background at module compile time, before the function has run. That early compile skips Liftoff's call feedback, so TurboFan inlines nothing on the strength of it. For regions the loss is small: the TLB fast path is already inline, the walk helper is out of line by design (J7.3), and core helpers are reached through the imported table, and V8 never inlines a call into another instance.
+
+Hints are revisited when an engine ships them. The module builder would then write the section per batch, like `name`, so it never enters a cached body or the cache key. Until then, Node can measure what they would buy (J13).
 
 `relaxed_madd` could replace tier 1's exact FMA emulation on engines where it always fuses. That needs evidence first: that the specification fixes the choice for a given engine and host rather than per call site or per compiler tier, plus a boot-time probe and a cache-key bit. It is J17 question 5.
 
@@ -681,6 +688,7 @@ C8 makes the interpreter and `wasm_jit` observationally identical: the same regi
 | Exits | budget expiry at exact counts; fault precision (a fault at instruction k leaves the state after k−1); exclusive windows and the grace cap; IC IVAU + ISB self-invalidation; mapping-change invalidation | Node |
 | Differential fuzzing | random instruction sequences from the decoder's encoding space, and whole regions: interpreter vs `wasm_jit`, compared at every exit | Node, nightly |
 | Engine matrix | the vector suite on V8, JSC and SpiderMonkey (Playwright WebKit and Firefox), proving the NaN fixups and FP emulation exact everywhere | CI, periodic |
+| Engine compile costs | per engine: the core's compile time on a first and a second launch (does the engine reuse compiled code? DESIGN.md §11); the synchronous `new WebAssembly.Instance` cost of a compiled batch (J8.4, J17 question 11); and each region's warm-up, from installation to steady state (J13) | CI, periodic (Playwright, three engines) |
 | End to end | homebrew NROs (DESIGN.md §25 Phase 2's proof of life): interpreter and JIT runs must produce the same hashes | headless Chrome e2e |
 
 The interpreter-vs-JIT differential cannot see decoder bugs, because both sides consume the same records. The decoder is covered by fuzzing the interpreter against an external reference (DESIGN.md §10, inherited ideas), which lands with the Phase 2 interpreter.
@@ -691,13 +699,23 @@ The interpreter-vs-JIT differential cannot see decoder bugs, because both sides 
 
 ## J13. Performance model and tiers
 
+Tier 1 and tier 2 are `wasm_jit`'s own tiers: what it emits. The engine's tiers run underneath both. Each engine compiles a module with its baseline compiler first and promotes hot functions to its optimizing compiler: Liftoff then TurboFan/Turboshaft in V8, BBQ then OMG in JSC, baseline then Ion in SpiderMonkey.
+
 **Where tier 1's time goes, by design:**
 
 - **Inside a region**, guest registers and flags end up in host registers once the engine's optimizing tier runs. A memory access that hits the TLB costs a handful of host instructions with no engine bounds check, since wasm32 memories use guard regions (DESIGN.md §4).
 - **Region transitions** cost a write-back of the written registers, a return, a hash probe, a `call_indirect`, and reloading the touched registers. This is tier 1's main overhead on branchy, call-heavy code.
 - **Cold code** runs in the engine's baseline tier until the engine promotes it. Regions are hot by construction (J4.7), so promotion comes quickly.
+- **Warm-up is real execution.** A region reaches the engine's optimizing tier by being called, and Voland never runs regions on synthetic input to get there sooner (J18). Region calls are bounded by the quantum (DESIGN.md §7), so an engine that switches tiers between calls picks up the optimized code on the next one. Engines promote on internal counters they don't specify and have changed before; V8, for one, moved from optimizing whole modules eagerly to optimizing hot functions. So `wasm_jit` doesn't tune against those counters. The levers it owns are the hotness threshold (J4.7), the region caps (J4.3) and the batch size (J6.6), plus compilation hints once an engine supports them (J11).
 
-**Tier-1 exit criteria**, measured in Phase 5: every translated form passes the vector suite on all three engines, and `wasm_jit` runs an integer homebrew benchmark set at least 3× faster than the predecoded interpreter. The 3× figure is a starting point for the maintainer to adjust.
+**Tier-1 exit criteria**, measured in Phase 5: every translated form passes the vector suite on all three engines, and `wasm_jit` runs an integer homebrew benchmark set at least 3× faster than the predecoded interpreter. The 3× figure is a starting point for the maintainer to adjust. It is measured in steady state, after the engine has optimized the regions. Warm-up is measured and reported separately, per engine: the time from a region's installation until its per-call cost reaches steady state. Warm-up gets tuned only if that measurement shows it matters, with the levers above.
+
+Under Node, V8's flags separate the tiers for these measurements:
+- `--no-liftoff` compiles everything with TurboFan up front, which gives steady state without waiting for warm-up.
+- `--liftoff-only` gives baseline speed.
+- `--wasm-compilation-hints` turns on the experimental hints (J11), to measure what they would buy before a browser ships them. V8's wasm feature flags are named `wasm_` plus the feature (`feature-flags.h`).
+
+None of these flags is available to a web page.
 
 **Tier 2.** Each item ships only when profiling shows its cost:
 
@@ -778,6 +796,22 @@ Decisions this document does not make, each with a recommendation where there is
 7. **FPSR cumulative exception flags** are not computed (J7.8). Accept that as a documented divergence, or require them? Computing IXC exactly would roughly double the cost of FP.
 8. **Accuracy trade-off modes.** Some emulators offer opt-in inexact modes (unfused FMA, no NaN fixup). DESIGN.md §3 says core owns semantics. *Recommendation:* no such modes in tier 1; revisit only with per-title evidence.
 9. **Switch 2.** ARMv8.2+ adds LSE atomics (plain read-modify-write under green threading), FP16 arithmetic and dot product: decoder and translator additions, with no ABI change.
+10. **Chrome's code cache for service-worker responses.** Chrome keeps a streamed module's optimized code only when Blink gives the response a code-cache handler; with none, nothing is cached (`kNoCacheHandler` in Blink's `v8_wasm_response_extensions.cc`). Which responses get one is decided in Blink's loader. That decides two things:
+    - whether the core module keeps Chrome's code cache when the service worker serves it cache-first (DESIGN.md §16);
+    - whether region batches could use the cache at all, by being served from the PTC at a URL.
+
+    Batches would also have to be byte-identical across sessions, since a cache entry is checked against a SHA-256 of the module bytes, so how regions are grouped into batches would have to be deterministic.
+
+    *Test it rather than read more source:*
+    - Chrome's `V8.WasmCodeCaching` histogram (`chrome://histograms`) separates hit, miss and no handler.
+    - The `v8.wasm.moduleCacheHit` trace event shows hits in a DevTools trace.
+
+    This is Chrome-only: WebKit's streaming path has no code cache (DESIGN.md §11).
+11. **Where JSC does its compile work.** WebKit runs `compileStreaming` in `CompilerMode::Validation` and only `instantiateStreaming` in `FullCompile` (`Source/WebCore/bindings/js/JSDOMGlobalObject.cpp`). That file covers only the streaming entry points. If `WebAssembly.compile` likewise leaves code generation to instantiation, then on Safari:
+    - the Compiler Worker's compile is mostly validation;
+    - the CPU worker's synchronous `new WebAssembly.Instance` (J8.4) does the rest. It runs between slices, but blocks the worker's event loop and delays the next slice.
+
+    The J12 measurement decides it. *Recommendation:* if JSC's instantiation is costly, use the asynchronous `WebAssembly.instantiate(module)` on that engine, so the driver keeps running slices while the compile finishes, provided JSC does that work off the worker's thread. Otherwise, shrink that engine's batches. Keep the synchronous path wherever instantiation is cheap.
 
 ---
 
@@ -801,3 +835,4 @@ Decisions this document does not make, each with a recommendation where there is
 | Batches of bodies per module | one module per region | per-module compile and instantiate overhead |
 | Crypto Extension as plain guest semantics, with a standing tripwire exception for the four AES forms (J17 question 1, decided 2026-10-28) | leaving them undefined; justifying every hit per PR; renaming them past the grep | They are the guest's own operations on its own data, as on hardware (DESIGN.md §1.6). Leaving them undefined breaks titles and stops nothing, since guest code can compute AES in software. Renaming would hide the hits instead of explaining them |
 | wasm32 core: `i32` context and host addresses, `i64` guest addresses (DESIGN.md v3.29) | memory64 (through v3.28) | Guest RAM is the application pool and fits in 4 GiB; Safari has no memory64; guard-region bounds checks are free (DESIGN.md §4) |
+| Real execution warms up the engine's optimizing tier; compilation hints are a watch item (J11, J13; DESIGN.md v3.32) | prewarming: calling each region repeatedly on synthetic input until the engine optimizes it | Regions are not side-effect-free. The page-table base is a relocated constant in the code (J5.5), not a context field, and a region runs code before its first check event, so a synthetic run reads and writes the running guest's memory and breaks C8. It would also feed the engine's profiling (call-target feedback) the wrong paths, and it tunes against tier-up counters the engines don't specify. Regions are hot by construction (J4.7), so real calls pass those counters quickly anyway |
