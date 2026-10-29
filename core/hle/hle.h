@@ -36,7 +36,12 @@
  * constants are genuine kernel results, e.g. 0xE401 = (114 << 9) | 1.
  * Service-specific results use their own module (§12). */
 #define HLE_RESULT_SUCCESS 0x00000000u
-#define HLE_RESULT_NOT_IMPLEMENTED 0xF601u
+/* Every value below is (description << 9) | 1 for the named libnx
+ * result.h KernelError_* description, checked when the IPC SVCs became
+ * the first code to return NOT_IMPLEMENTED/NOT_FOUND from a guest-visible
+ * path: NOT_IMPLEMENTED was 0xF601 (that is ConnectionClosed=123),
+ * NOT_FOUND 0xE002 and ALREADY_EXISTS 0xFA02 (both module 2, FS). */
+#define HLE_RESULT_NOT_IMPLEMENTED 0x4201u /* KernelError_NotImplemented=33 */
 #define HLE_RESULT_INVALID_HANDLE 0xE401u
 #define HLE_RESULT_INVALID_POINTER 0xCC01u /* KernelError_InvalidAddress=102 */
 /* Was 0x1A01 (module=13, not a real kernel description) until the memory
@@ -45,8 +50,12 @@
  * (KernelError_OutOfMemory=104) and corrected here rather than shipped
  * wrong the first time it became observable. */
 #define HLE_RESULT_OUT_OF_MEMORY 0xD001u /* KernelError_OutOfMemory=104 */
-#define HLE_RESULT_NOT_FOUND 0xE002u
-#define HLE_RESULT_ALREADY_EXISTS 0xFA02u
+#define HLE_RESULT_NOT_FOUND 0xF201u         /* KernelError_NotFound=121 */
+#define HLE_RESULT_ALREADY_EXISTS 0xF401u    /* KernelError_AlreadyExists=122 */
+/* Added for the IPC SVCs (svc_ipc.h); same libnx result.h source. */
+#define HLE_RESULT_OUT_OF_SESSIONS 0x0E01u   /* KernelError_OutOfSessions=7 */
+#define HLE_RESULT_OUT_OF_RANGE 0xEE01u      /* KernelError_OutOfRange=119 */
+#define HLE_RESULT_CONNECTION_CLOSED 0xF601u /* KernelError_ConnectionClosed=123 */
 /* Added for the memory SVCs (svc_memory.h); same libnx result.h source. */
 #define HLE_RESULT_INVALID_SIZE 0xCA01u          /* KernelError_InvalidSize=101 */
 #define HLE_RESULT_INVALID_MEMORY_STATE 0xD401u  /* KernelError_InvalidMemoryState=106, aka InvalidCurrentMemory */
@@ -63,23 +72,27 @@ typedef struct HLE_Context
   Page_Allocator *pages; /* guest physical pages (§4), shared with the bootstrap */
   /* Phase 1 handle-table stand-in for IPC sessions only (ipc.h's "KNOWN
    * SIMPLIFICATION"); discarded whole when the Phase 2 generic handle
-   * table (process.h) lands. Zeroed by hle_context_init; callers must
-   * additionally call ipc_session_table_init(&context->sessions) before
-   * the first ConnectToNamedPort - not done implicitly here so this
-   * header does not have to include ipc.c's init ordering assumptions. */
+   * table (process.h) lands. Per-process: emptied by hle_context_init and
+   * by hle_reset_process_state, which the program unload path must call so
+   * one program's handles never reach the next. */
   IPC_Session_Table sessions;
   /* The object ConnectToNamedPort("sm:") binds a new session to - see
-   * svc_ipc.c. Owned by whoever calls hle_context_init's caller
-   * (emulator.c binds it to an Emulator-owned SM_Context via
-   * sm_make_service_object(), sm.h); HLE_Context itself only stores the
+   * svc_ipc.c. hle_context_init leaves it unbound (NULL interface); the
+   * owner binds it afterwards (emulator.c, to its SM_Context via
+   * sm_make_service_object(), sm.h). HLE_Context only stores the
    * Service_Object value, keeping this generic dispatch layer from
-   * depending on any one service's header. */
+   * depending on any one service's header. Not per-process: survives
+   * hle_reset_process_state. */
   Service_Object sm_object;
   uint64_t svc_call_count;
 } HLE_Context;
 
 void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
                       VMM_Context *vmm, Process *process, Page_Allocator *pages);
+
+/* Drops every per-process HLE object (today: the IPC session table).
+ * Called on program unload; the next program starts with no handles. */
+void hle_reset_process_state(HLE_Context *context);
 
 /* CPU_SVC_Handler-compatible entry point. `swi` is the SVC instruction's
  * immediate - the actual Horizon syscall id. It is NOT in X8; that is the

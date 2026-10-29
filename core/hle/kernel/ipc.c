@@ -1,16 +1,7 @@
 /**
  * HIPC + CMIF framing, service-object dispatch, and the Phase 1 session
- * table. See ipc.h for scope and the flagged simplifications.
- *
- * Wire layout (word0/word1 bit packing, descriptor ordering) is per
- * switchbrew's "HIPC" page, cross-checked while writing this file. The
- * CMIF inner header (SFCI/SFCO magic, version, 64-bit command_id/result)
- * and the response message's own `type` field (written here as 0 - real
- * captures show clients do not gate on it, but this is the one wire
- * detail NOT independently re-verified in this pass) are flagged for a
- * libnx/Ryujinx/yuzu cross-reference test before this is trusted against
- * a real homebrew NRO (Phase 2's proof of life) - see svc_ipc_test.c's
- * test plan.
+ * table. See ipc.h for scope, the flagged simplifications, and the wire
+ * layout (verified against libnx's sf/hipc.h and sf/cmif.h).
  */
 #include "hle/kernel/ipc.h"
 
@@ -19,16 +10,6 @@
                       * value-level constants; see ipc.h's header comment) */
 
 #include <string.h>
-
-/* ------------------------------------------------------------------ */
-/* Wire-format constants. Not in ipc.h: callers never need them, only   */
-/* parse/write do.                                                      */
-/* ------------------------------------------------------------------ */
-
-#define IPC_RAW_DATA_ALIGN 16u
-#define IPC_CMIF_HEADER_BYTES 16u /* magic(4) + version(4) + command_id/result(8) */
-#define IPC_CMIF_MAGIC_SFCI 0x49434653u /* "SFCI" read little-endian */
-#define IPC_CMIF_MAGIC_SFCO 0x4F434653u /* "SFCO" read little-endian */
 
 static uint32_t read_u32(const uint8_t *p) {
   uint32_t v;
@@ -43,7 +24,6 @@ static uint64_t read_u64(const uint8_t *p) {
 }
 
 static void write_u32(uint8_t *p, uint32_t v) { memcpy(p, &v, sizeof(v)); }
-static void write_u64(uint8_t *p, uint64_t v) { memcpy(p, &v, sizeof(v)); }
 
 static uint32_t align_up(uint32_t value, uint32_t align) {
   return (value + align - 1u) & ~(align - 1u);
@@ -112,74 +92,87 @@ Error ipc_request_parse(const uint8_t *buffer, uint32_t buffer_size, IPC_Request
   const uint32_t word0 = read_u32(buffer + 0);
   const uint32_t word1 = read_u32(buffer + 4);
 
-  const uint32_t type = word0 & 0xFFFFu;
-  const uint32_t num_x = (word0 >> 16) & 0xFu;
-  const uint32_t num_a = (word0 >> 20) & 0xFu;
-  const uint32_t num_b = (word0 >> 24) & 0xFu;
-  const uint32_t num_w = (word0 >> 28) & 0xFu;
-  const uint32_t data_size_words = word1 & 0x3FFu;
-  const uint32_t c_flags = (word1 >> 10) & 0xFu;
-  const bool has_special_header = (word1 >> 31) != 0;
+  const uint32_t type = word0 & IPC_HIPC_TYPE_MASK;
+  const uint32_t num_x = (word0 >> IPC_HIPC_NUM_X_SHIFT) & IPC_HIPC_DESCRIPTOR_COUNT_MASK;
+  const uint32_t num_a = (word0 >> IPC_HIPC_NUM_A_SHIFT) & IPC_HIPC_DESCRIPTOR_COUNT_MASK;
+  const uint32_t num_b = (word0 >> IPC_HIPC_NUM_B_SHIFT) & IPC_HIPC_DESCRIPTOR_COUNT_MASK;
+  const uint32_t num_w = (word0 >> IPC_HIPC_NUM_W_SHIFT) & IPC_HIPC_DESCRIPTOR_COUNT_MASK;
+  const uint32_t num_data_words = word1 & IPC_HIPC_NUM_DATA_WORDS_MASK;
+  const uint32_t recv_static_mode =
+      (word1 >> IPC_HIPC_RECV_STATIC_MODE_SHIFT) & IPC_HIPC_RECV_STATIC_MODE_MASK;
+  const bool has_special_header = (word1 & IPC_HIPC_HAS_SPECIAL_HEADER_BIT) != 0;
 
-  if (type != (uint32_t)IPC_MESSAGE_TYPE_REQUEST) {
-    return ERR(RESULT_NOT_IMPLEMENTED,
-              "ipc_request_parse: only IPC_MESSAGE_TYPE_REQUEST is supported (Phase 1)");
+  if (type == (uint32_t)IPC_MESSAGE_TYPE_TIPC_CLOSE ||
+      type >= (uint32_t)IPC_MESSAGE_TYPE_TIPC_REQUEST_BASE) {
+    return ERR(RESULT_NOT_IMPLEMENTED, "ipc_request_parse: TIPC messages are deferred (ipc.h)");
   }
-  if (num_x != 0 || num_a != 0 || num_b != 0 || num_w != 0 || c_flags != 0) {
+  if (type != (uint32_t)IPC_MESSAGE_TYPE_REQUEST && type != (uint32_t)IPC_MESSAGE_TYPE_CLOSE) {
     return ERR(RESULT_NOT_IMPLEMENTED,
-              "ipc_request_parse: X/A/B/C buffer descriptors are not supported (Phase 1)");
+              "ipc_request_parse: only Request and Close messages are supported (Phase 1)");
+  }
+  if (num_x != 0 || num_a != 0 || num_b != 0 || num_w != 0 || recv_static_mode != 0) {
+    return ERR(RESULT_NOT_IMPLEMENTED,
+              "ipc_request_parse: X/A/B/W buffer descriptors and receive lists are not supported (Phase 1)");
   }
 
-  uint32_t offset = 8;
+  uint32_t offset = IPC_HIPC_HEADER_BYTES;
   bool has_pid = false;
-  uint64_t pid = 0;
+  uint64_t guest_pid = 0;
   if (has_special_header) {
-    if (offset + 4u > buffer_size) {
-      return ERR(RESULT_MEMORY_FAULT, "ipc_request_parse: special header truncated");
-    }
     const uint32_t special = read_u32(buffer + offset);
-    offset += 4;
-    const bool send_pid = (special & 0x1u) != 0;
-    const uint32_t copy_handle_count = (special >> 1) & 0xFu;
-    const uint32_t move_handle_count = (special >> 5) & 0xFu;
+    offset += IPC_HIPC_SPECIAL_HEADER_BYTES;
+    const uint32_t copy_handle_count =
+        (special >> IPC_HIPC_NUM_COPY_HANDLES_SHIFT) & IPC_HIPC_HANDLE_COUNT_MASK;
+    const uint32_t move_handle_count =
+        (special >> IPC_HIPC_NUM_MOVE_HANDLES_SHIFT) & IPC_HIPC_HANDLE_COUNT_MASK;
     if (copy_handle_count != 0 || move_handle_count != 0) {
       return ERR(RESULT_NOT_IMPLEMENTED,
                 "ipc_request_parse: request-direction handle descriptors are not supported (Phase 1)");
     }
-    if (send_pid) {
-      if (offset + 8u > buffer_size) {
-        return ERR(RESULT_MEMORY_FAULT, "ipc_request_parse: pid truncated");
-      }
-      pid = read_u64(buffer + offset);
-      offset += 8;
+    if ((special & IPC_HIPC_SEND_PID_BIT) != 0) {
+      guest_pid = read_u64(buffer + offset);
+      offset += IPC_HIPC_PID_BYTES;
       has_pid = true;
     }
   }
+  /* Every fixed-size field above ends at most 20 bytes in, well inside
+   * the 0x100-byte buffer; only the guest-declared data size needs a
+   * bounds check. */
 
-  const uint32_t raw_data_offset = align_up(offset, IPC_RAW_DATA_ALIGN);
-  const uint32_t raw_data_bytes = data_size_words * 4u;
-  if (raw_data_bytes < IPC_CMIF_HEADER_BYTES) {
-    return ERR(RESULT_MEMORY_FAULT, "ipc_request_parse: data_size smaller than the CMIF header");
-  }
-  if (raw_data_offset + raw_data_bytes > buffer_size) {
-    return ERR(RESULT_MEMORY_FAULT, "ipc_request_parse: declared data_size runs past the command buffer");
-  }
-
-  const uint32_t magic = read_u32(buffer + raw_data_offset);
-  if (magic != IPC_CMIF_MAGIC_SFCI) {
-    return ERR(RESULT_NOT_IMPLEMENTED,
-              "ipc_request_parse: raw data is not an SFCI (CMIF) request");
-  }
-  /* buffer + raw_data_offset + 4: CMIF version word, ignored - no real
-   * service inspects it. */
-  const uint64_t command_id_64 = read_u64(buffer + raw_data_offset + 8);
-
-  out->command_id = (uint32_t)command_id_64; /* ipc.h: low 32 bits only -
-                                              * every real command id fits */
   out->has_pid = has_pid;
-  out->pid = pid;
-  out->data = buffer + raw_data_offset + IPC_CMIF_HEADER_BYTES;
-  out->data_size = raw_data_bytes - IPC_CMIF_HEADER_BYTES;
+  out->guest_pid = guest_pid;
+
+  if (type == (uint32_t)IPC_MESSAGE_TYPE_CLOSE) {
+    /* libnx's non-domain Close carries no raw data. A domain Close (a
+     * Request with a domain header) never reaches here: no session is a
+     * domain in Phase 1. */
+    out->type = IPC_MESSAGE_TYPE_CLOSE;
+    return OK;
+  }
+
+  /* The raw data section starts right after the last descriptor and
+   * num_data_words covers all of it, alignment padding included (ipc.h). */
+  const uint32_t data_start = offset;
+  const uint32_t data_end = data_start + num_data_words * IPC_HIPC_DATA_WORD_BYTES;
+  const uint32_t cmif_offset = align_up(data_start, IPC_CMIF_ALIGN);
+  if (data_end > buffer_size) {
+    return ERR(RESULT_MEMORY_FAULT, "ipc_request_parse: declared data size runs past the command buffer");
+  }
+  if (cmif_offset + IPC_CMIF_HEADER_BYTES > data_end) {
+    return ERR(RESULT_MEMORY_FAULT, "ipc_request_parse: raw data too short for the aligned CMIF header");
+  }
+
+  if (read_u32(buffer + cmif_offset + IPC_CMIF_MAGIC_OFFSET) != IPC_CMIF_MAGIC_SFCI) {
+    return ERR(RESULT_NOT_IMPLEMENTED, "ipc_request_parse: raw data is not an SFCI (CMIF) request");
+  }
+  /* Version and token are ignored: version is nonzero only for the
+   * WithContext types rejected above, and no Phase 1 service reads the
+   * token. */
+
+  out->type = IPC_MESSAGE_TYPE_REQUEST;
+  out->command_id = read_u32(buffer + cmif_offset + IPC_CMIF_COMMAND_ID_OFFSET);
+  out->data = buffer + cmif_offset + IPC_CMIF_HEADER_BYTES;
+  out->data_size = data_end - (cmif_offset + IPC_CMIF_HEADER_BYTES);
   return OK;
 }
 
@@ -239,39 +232,39 @@ Error ipc_response_write(uint8_t *buffer, uint32_t buffer_size, const IPC_Respon
   memset(buffer, 0, buffer_size);
 
   const bool has_special_header = out_handle_count > 0;
-  uint32_t offset = 8;
+  uint32_t offset = IPC_HIPC_HEADER_BYTES;
   if (has_special_header) {
-    /* send_pid=0 (bit 0), copy_handle_count=0 (bits 1-4), move_handle_count
-     * in bits 5-8 - a response never needs to send its own pid, and
+    /* No pid and no copy handles: a response never sends its own pid, and
      * Phase 1 never produces a copy handle (ipc.h). */
-    const uint32_t special = out_handle_count << 5;
-    write_u32(buffer + offset, special);
-    offset += 4;
+    write_u32(buffer + offset, out_handle_count << IPC_HIPC_NUM_MOVE_HANDLES_SHIFT);
+    offset += IPC_HIPC_SPECIAL_HEADER_BYTES;
     for (uint32_t i = 0; i < out_handle_count; i++) {
       write_u32(buffer + offset, out_handles[i]);
-      offset += 4;
+      offset += IPC_HIPC_HANDLE_BYTES;
     }
   }
 
-  const uint32_t raw_data_offset = align_up(offset, IPC_RAW_DATA_ALIGN);
-  const uint32_t raw_data_bytes = IPC_CMIF_HEADER_BYTES; /* Phase 1 commands
-                                                          * produce no extra
-                                                          * output data */
-  if (raw_data_offset + raw_data_bytes > buffer_size) {
+  /* Raw data: starts right after the handles; the SFCO header sits at the
+   * first aligned boundary inside it. Sized the way libnx sizes requests -
+   * a full padding reserve plus the header - so the declared section
+   * always covers the header wherever the handles leave the start. Phase 1
+   * commands produce no output payload. */
+  const uint32_t data_start = offset;
+  const uint32_t data_bytes = IPC_CMIF_PADDING_BYTES + IPC_CMIF_HEADER_BYTES;
+  const uint32_t cmif_offset = align_up(data_start, IPC_CMIF_ALIGN);
+  if (data_start + data_bytes > buffer_size) {
     return ERR(RESULT_INVALID_ARGUMENT, "ipc_response_write: response does not fit the command buffer");
   }
 
-  write_u32(buffer + raw_data_offset, IPC_CMIF_MAGIC_SFCO);
-  write_u32(buffer + raw_data_offset + 4, 0); /* CMIF version */
-  write_u64(buffer + raw_data_offset + 8, (uint64_t)res->result);
+  write_u32(buffer + cmif_offset + IPC_CMIF_MAGIC_OFFSET, IPC_CMIF_MAGIC_SFCO);
+  write_u32(buffer + cmif_offset + IPC_CMIF_VERSION_OFFSET, 0);
+  write_u32(buffer + cmif_offset + IPC_CMIF_RESULT_OFFSET, res->result);
+  write_u32(buffer + cmif_offset + IPC_CMIF_TOKEN_OFFSET, 0);
 
-  /* Response message type: written 0 here, NOT re-verified in this pass
-   * (see file header comment) - flagged for a cross-reference test
-   * before this is trusted against real client-side response parsing. */
-  const uint32_t word0 = 0;
-  const uint32_t data_size_words = raw_data_bytes / 4u;
-  const uint32_t word1 = (data_size_words & 0x3FFu) | (has_special_header ? (1u << 31) : 0u);
-  write_u32(buffer + 0, word0);
+  /* Type 0 in word 0: libnx's response parsing never reads it (ipc.h). */
+  const uint32_t word1 = ((data_bytes / IPC_HIPC_DATA_WORD_BYTES) & IPC_HIPC_NUM_DATA_WORDS_MASK) |
+                         (has_special_header ? IPC_HIPC_HAS_SPECIAL_HEADER_BIT : 0u);
+  write_u32(buffer + 0, (uint32_t)IPC_MESSAGE_TYPE_INVALID);
   write_u32(buffer + 4, word1);
 
   return OK;

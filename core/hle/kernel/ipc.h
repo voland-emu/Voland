@@ -14,30 +14,53 @@
  * should be updated to match in the same PR that implements this header,
  * per CLAUDE.md "deviations update the doc".
  *
+ * Wire format. Verified against libnx's sf/hipc.h, sf/cmif.h, sf/tipc.h
+ * and sf/service.h (switchbrew/libnx b156b47, October 2026) - the client
+ * every homebrew title links - rather than against switchbrew prose
+ * alone. Every field position and mask is a named constant below, and the
+ * tests build their fixtures from the same constants (or as literal libnx
+ * bytes), so the layout lives in exactly one place:
+ *   - HIPC header (8 bytes), then the special header (4 bytes) iff
+ *     word1's has_special_header bit, then the pid (8 bytes) iff the
+ *     special header's send_pid bit, then copy handles, move handles, the
+ *     X/A/B/W descriptors, and finally the raw data words.
+ *   - The raw data section starts IMMEDIATELY after the last descriptor -
+ *     not aligned - and num_data_words counts every word of it, including
+ *     the alignment padding in front of the CMIF header. The CMIF header
+ *     sits at the first 16-byte boundary (measured from the start of the
+ *     command buffer) at or after the section start. libnx reserves a
+ *     full IPC_CMIF_PADDING_BYTES for that padding in every request it
+ *     sizes; responses written here do the same.
+ *   - CMIF in header: magic "SFCI", version, command_id, token (4 x u32).
+ *     CMIF out header: magic "SFCO", version, result, token.
+ *
  * Scope for this header (Phase 1, "Minimal IPC"):
- *   - Message type must be IPC_MESSAGE_TYPE_REQUEST. Control messages
- *     (domain conversion, session cloning, pointer-buffer-size query -
- *     HIPC types 2/3/5/6/7) are parsed far enough to be recognised and
- *     then rejected with RESULT_NOT_IMPLEMENTED; nothing dispatches
- *     through this phase needs them. sm: is conventionally never
- *     domain-converted in practice, and no other service exists yet to
- *     need domains before Phase 2+.
- *   - X/A/B/C buffer descriptors: rejected (count must be 0 in the
- *     request). sm:'s only Phase 1 command (GetService) takes its
- *     8-byte ServiceName in the raw data payload, not a buffer - real
- *     Horizon does this too. The first service that needs a buffer
+ *   - IPC_MESSAGE_TYPE_REQUEST is dispatched. IPC_MESSAGE_TYPE_CLOSE is
+ *     accepted: libnx's serviceClose sends one through SendSyncRequest
+ *     before every svcCloseHandle on a session it owns, so rejecting it
+ *     would fail every service teardown. The other CMIF types
+ *     (LegacyRequest, LegacyControl, Control and the WithContext forms -
+ *     domain conversion, session cloning, pointer-buffer-size query) are
+ *     recognised and rejected with RESULT_NOT_IMPLEMENTED; nothing this
+ *     phase dispatches needs them, and sm: is never domain-converted.
+ *   - TIPC (type IPC_MESSAGE_TYPE_TIPC_CLOSE, or IPC_MESSAGE_TYPE_TIPC_
+ *     REQUEST_BASE + command id; no SFCI header) is recognised and
+ *     rejected with RESULT_NOT_IMPLEMENTED - DEFERRED, not omitted. libnx
+ *     talks to sm: over CMIF for RegisterClient and GetServiceHandle on
+ *     every firmware (sm.c says so explicitly) and uses TIPC only for
+ *     RegisterService, which Voland does not implement (sm.h). Nintendo's
+ *     own SDK reaches sm: over TIPC on firmware 12+, so retail titles
+ *     need TIPC before Phase 4's first boot; see DESIGN.md §12.
+ *   - X/A/B/W buffer descriptors and C receive lists: rejected (count must
+ *     be 0). sm:'s Phase 1 commands carry their 8-byte ServiceName in the
+ *     raw data, not a buffer. The first service that needs a buffer
  *     descriptor is what pulls support for them in.
  *   - Handle descriptors in the REQUEST direction (the guest handing
  *     Voland a handle): rejected (copy/move handle counts must be 0).
- *     Nothing in sm:'s Phase 1 command table receives one. The
- *     send-pid bit IS supported (parsed into IPC_Request::pid) since the
- *     kernel sets it unconditionally on every HIPC message's special
- *     header for connections to anything (switchbrew "IPC Marshalling");
- *     a parser that can't read it can't read a single real message.
+ *     The send-pid bit IS parsed: RegisterClient sets it.
  *   - Handle descriptors in the RESPONSE direction: move objects only
  *     (IPC_Response::out_objects), capped at IPC_MAX_OUT_OBJECTS. Copy
- *     handles out: not produced by anything Phase 1 dispatches; the
- *     wire format support is not built until a command needs it.
+ *     handles out: not produced by anything Phase 1 dispatches.
  *
  * KNOWN SIMPLIFICATION, flagged for review (CLAUDE.md "deviations update
  * the doc"): IPC_Session_Table below is a Phase 1 stand-in for §12's
@@ -122,9 +145,9 @@ struct Service_Interface {
 /* Parsed request / response views (§12 "HIPC"/"CMIF").                */
 /* ------------------------------------------------------------------ */
 
-/* HIPC message types this phase recognises (switchbrew "IPC Marshalling").
- * Only REQUEST is dispatched; every other value is a recognised-but-
- * unsupported Control/Close message (see header comment). */
+/* HIPC message types (libnx CmifCommandType / TipcCommandType). REQUEST
+ * is dispatched and CLOSE is accepted; every other value is recognised and
+ * rejected (see header comment). */
 typedef enum IPC_Message_Type {
   IPC_MESSAGE_TYPE_INVALID = 0,
   IPC_MESSAGE_TYPE_LEGACY_REQUEST = 1,
@@ -134,19 +157,72 @@ typedef enum IPC_Message_Type {
   IPC_MESSAGE_TYPE_CONTROL = 5,
   IPC_MESSAGE_TYPE_REQUEST_WITH_CONTEXT = 6,
   IPC_MESSAGE_TYPE_CONTROL_WITH_CONTEXT = 7,
+  IPC_MESSAGE_TYPE_TIPC_CLOSE = 15,
+  /* TIPC requests carry their command id in the type: base + id. */
+  IPC_MESSAGE_TYPE_TIPC_REQUEST_BASE = 16,
 } IPC_Message_Type;
 
+/* ------------------------------------------------------------------ */
+/* Wire layout (see header comment). Shared with the tests.           */
+/* ------------------------------------------------------------------ */
+
+#define IPC_HIPC_HEADER_BYTES 8u
+#define IPC_HIPC_SPECIAL_HEADER_BYTES 4u
+#define IPC_HIPC_PID_BYTES 8u
+#define IPC_HIPC_HANDLE_BYTES 4u
+#define IPC_HIPC_DATA_WORD_BYTES 4u
+
+/* Header word 0. */
+#define IPC_HIPC_TYPE_MASK 0xFFFFu
+#define IPC_HIPC_NUM_X_SHIFT 16u /* send statics */
+#define IPC_HIPC_NUM_A_SHIFT 20u /* send buffers */
+#define IPC_HIPC_NUM_B_SHIFT 24u /* recv buffers */
+#define IPC_HIPC_NUM_W_SHIFT 28u /* exchange buffers */
+#define IPC_HIPC_DESCRIPTOR_COUNT_MASK 0xFu
+
+/* Header word 1. */
+#define IPC_HIPC_NUM_DATA_WORDS_MASK 0x3FFu
+#define IPC_HIPC_RECV_STATIC_MODE_SHIFT 10u
+#define IPC_HIPC_RECV_STATIC_MODE_MASK 0xFu
+#define IPC_HIPC_HAS_SPECIAL_HEADER_BIT (1u << 31)
+
+/* Special header. */
+#define IPC_HIPC_SEND_PID_BIT 1u
+#define IPC_HIPC_NUM_COPY_HANDLES_SHIFT 1u
+#define IPC_HIPC_NUM_MOVE_HANDLES_SHIFT 5u
+#define IPC_HIPC_HANDLE_COUNT_MASK 0xFu
+
+/* CMIF header, at the first IPC_CMIF_ALIGN boundary of the raw data. */
+#define IPC_CMIF_ALIGN 16u
+#define IPC_CMIF_PADDING_BYTES 16u /* alignment reserve counted in num_data_words */
+#define IPC_CMIF_HEADER_BYTES 16u
+#define IPC_CMIF_MAGIC_OFFSET 0u
+#define IPC_CMIF_VERSION_OFFSET 4u
+#define IPC_CMIF_COMMAND_ID_OFFSET 8u /* request */
+#define IPC_CMIF_RESULT_OFFSET 8u     /* response */
+#define IPC_CMIF_TOKEN_OFFSET 12u
+#define IPC_CMIF_MAGIC_SFCI 0x49434653u /* "SFCI" read little-endian */
+#define IPC_CMIF_MAGIC_SFCO 0x4F434653u /* "SFCO" read little-endian */
+
 typedef struct IPC_Request {
-  uint32_t command_id; /* CMIF command id, i.e. the word right after the
-                        * SFCI magic in the data payload */
-  bool has_pid;         /* HIPC special header's send_pid bit */
-  uint64_t pid;         /* valid iff has_pid: the kernel-stamped caller pid */
-  const uint8_t *data;  /* raw payload after the command id, `data_size`
-                         * bytes; points into the caller's own local copy
-                         * of the command buffer (svc_ipc.c) - valid only
-                         * for the parse/dispatch/write call chain's
-                         * duration, never retained past it */
-  uint32_t data_size;
+  IPC_Message_Type type; /* REQUEST or CLOSE; nothing else parses */
+  uint32_t command_id;   /* CMIF command id; 0 for CLOSE */
+  bool has_pid;          /* HIPC special header's send_pid bit */
+  /* Valid iff has_pid. UNTRUSTED: these are the guest's own 8 bytes, not
+   * a kernel-stamped pid - real Horizon overwrites the field in transit,
+   * and libnx leaves it uninitialised. Voland has no process id until the
+   * Phase 2 process object exists; until then no service may read this,
+   * and the field must be overwritten in svc_ipc.c before one does. */
+  uint64_t guest_pid;
+  const uint8_t *data;   /* payload after the CMIF header, `data_size`
+                          * bytes; points into the caller's own local copy
+                          * of the command buffer (svc_ipc.c) - valid only
+                          * for the parse/dispatch/write call chain's
+                          * duration, never retained past it. NULL for
+                          * CLOSE. */
+  uint32_t data_size;    /* up to the end of the declared raw data section;
+                          * may exceed the command's own payload by libnx's
+                          * halfword/word rounding */
 } IPC_Request;
 
 /* Maximum handles one IPC response can move out. Phase 1's only producer
@@ -188,6 +264,10 @@ bool ipc_response_add_move_object(IPC_Response *res, Service_Object object);
 
 typedef struct IPC_Session {
   Service_Object object;
+  /* Set by a CLOSE message: the server end is gone, so every later request
+   * fails with the kernel's ConnectionClosed. The handle itself stays
+   * open until CloseHandle, as on real Horizon. */
+  bool server_closed;
   bool is_domain; /* Control-message-driven; always false until that
                    * message type is implemented (see header comment) */
   Service_Object domain_objects[IPC_MAX_DOMAIN_OBJECTS];
@@ -202,8 +282,8 @@ typedef struct IPC_Session_Table {
 void ipc_session_table_init(IPC_Session_Table *table);
 
 /* Binds `object` to a fresh handle. IPC_INVALID_HANDLE if every slot is
- * in use (RESULT_OUT_OF_MEMORY's IPC-layer shape - svc_ipc.c maps it to
- * the kernel's own out-of-handles Result). */
+ * in use; svc_ipc.c reports that to the guest as HLE_RESULT_OUT_OF_SESSIONS
+ * (KernelError_OutOfSessions). */
 uint32_t ipc_session_table_open(IPC_Session_Table *table, Service_Object object);
 
 /* NULL if `handle` is IPC_INVALID_HANDLE or not currently open. */
@@ -221,14 +301,18 @@ bool ipc_session_table_close(IPC_Session_Table *table, uint32_t handle);
 
 /* Parses a HIPC+CMIF request out of `buffer`
  * (TLS_IPC_COMMAND_BUFFER_BYTES bytes). See header comment for the exact
- * supported subset.
+ * supported subset. A CLOSE message parses to `out->type ==
+ * IPC_MESSAGE_TYPE_CLOSE` with no CMIF header read.
  *   RESULT_INVALID_ARGUMENT  NULL buffer/out, or buffer_size !=
  *                            TLS_IPC_COMMAND_BUFFER_BYTES
- *   RESULT_NOT_IMPLEMENTED   type != IPC_MESSAGE_TYPE_REQUEST, or any
- *                            X/A/B/C descriptor count, or any request-
- *                            direction copy/move handle count, is nonzero
- *   RESULT_MEMORY_FAULT      data_size as declared by the header would
- *                            read past `buffer_size` (a malformed guest
+ *   RESULT_NOT_IMPLEMENTED   type is neither REQUEST nor CLOSE (TIPC
+ *                            included), any X/A/B/W descriptor count or
+ *                            receive-list mode, or any request-direction
+ *                            copy/move handle count, is nonzero, or the
+ *                            raw data is not SFCI
+ *   RESULT_MEMORY_FAULT      the declared raw data section runs past
+ *                            `buffer_size`, or is too short to hold the
+ *                            aligned CMIF header (a malformed guest
  *                            message, not a vmm fault - name kept for the
  *                            same "out of bounds" meaning) */
 Error ipc_request_parse(const uint8_t *buffer, uint32_t buffer_size, IPC_Request *out);
@@ -241,7 +325,9 @@ Error ipc_request_parse(const uint8_t *buffer, uint32_t buffer_size, IPC_Request
 void ipc_dispatch(Service_Object *object, const IPC_Request *req, IPC_Response *res);
 
 /* Writes `res` as a CMIF response (SFCO + Result, + out handles) into
- * `buffer` (TLS_IPC_COMMAND_BUFFER_BYTES bytes). `out_handles[i]` is the
+ * `buffer` (TLS_IPC_COMMAND_BUFFER_BYTES bytes). The HIPC type field is
+ * written as 0: libnx's hipcParseResponse/cmifParseResponse never read
+ * it. `out_handles[i]` is the
  * real guest handle already allocated (ipc_session_table_open) for
  * `res->out_objects[i]`; this function only serialises, it never opens a
  * session itself.

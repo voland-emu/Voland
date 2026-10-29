@@ -57,11 +57,10 @@ Error emulator_create(Emulator* out) {
   out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
   out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
 
-  /* 6. IPC (§25 Phase 1 "Minimal IPC + sm: stub"): the Phase 1 session
-   * table (ipc.h) and sm:'s registry, bound to the well-known port
-   * ConnectToNamedPort("sm:") resolves to (svc_ipc.c). No service module
-   * registers with it yet - none exist before Phase 2+. */
-  ipc_session_table_init(&out->hle.sessions);
+  /* 6. IPC (§25 Phase 1 "Minimal IPC + sm: stub"): sm:'s registry, bound
+   * to the well-known port ConnectToNamedPort("sm:") resolves to
+   * (svc_ipc.c). hle_context_init already emptied the session table. No
+   * service module registers with sm yet - none exist before Phase 2+. */
   sm_context_init(&out->sm);
   out->hle.sm_object = sm_make_service_object(&out->sm);
 
@@ -172,6 +171,7 @@ void emulator_unload_program(Emulator* emulator) {
   if (!emulator || !emulator->program_loaded) return;
   process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
   page_allocator_reset(&emulator->pages);
+  hle_reset_process_state(&emulator->hle);
   emulator->program_loaded = false;
 }
 
