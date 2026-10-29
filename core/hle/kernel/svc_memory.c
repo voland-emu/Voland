@@ -10,6 +10,7 @@
 #include "common/log.h"
 
 #include <stddef.h>
+#include <string.h>
 
 static bool ranges_overlap(uint64_t a_base, uint64_t a_size, uint64_t b_base, uint64_t b_size) {
   return a_base < b_base + b_size && b_base < a_base + a_size;
@@ -159,6 +160,16 @@ void hle_svc_set_heap_size(HLE_Context *context, CPU_State *cpu_state) {
       regs->x[0] = HLE_RESULT_OUT_OF_MEMORY;
       return;
     }
+    /* Horizon hands out zeroed heap. The pages may come from the
+     * allocator's freelist (a shrink-then-regrow) and still hold the
+     * guest's old bytes: layout.h only promises zero on first commit. */
+    vmm_borrow_scope_begin(context->vmm);
+    void *host = NULL;
+    err = vmm_guest_to_host(context->vmm, heap->base + process->heap_size, grow_bytes,
+                            VMM_PERM_RW, &host);
+    if (error_is_ok(err)) memset(host, 0, (size_t)grow_bytes);
+    vmm_borrow_scope_end(context->vmm);
+    SWITCH_ASSERT_ALWAYS(error_is_ok(err), "hle_svc_set_heap_size: fresh heap range not RW");
     process->heap_size = requested;
   } else if (requested < process->heap_size) {
     const uint64_t shrink_base = heap->base + requested;

@@ -54,6 +54,11 @@ Error page_allocator_allocate(Page_Allocator *allocator, uint64_t page_count,
   for (uint32_t i = 0; i < allocator->free_run_count; i++) {
     Page_Run *run = &allocator->free_runs[i];
     if (run->page_count >= page_count) {
+      /* Already committed when it was first handed out (no decommit on
+       * free, layout.h); committing again is a no-op, but it keeps the
+       * invariant local instead of relying on that history. */
+      const Error committed = layout_guest_ram_commit(run->pa, page_count << VMM_PAGE_BITS);
+      if (!error_is_ok(committed)) return committed;
       *out_pa = run->pa;
       if (run->page_count == page_count) {
         allocator->free_runs[i] = allocator->free_runs[--allocator->free_run_count];
@@ -71,7 +76,13 @@ Error page_allocator_allocate(Page_Allocator *allocator, uint64_t page_count,
   if (page_count > free_pages) {
     return ERR(RESULT_OUT_OF_MEMORY, "page_allocator_allocate: guest RAM exhausted");
   }
-  *out_pa = allocator->base_pa + allocator->used_bytes;
+  const uint64_t pa = allocator->base_pa + allocator->used_bytes;
+  /* §4: native reserves guest RAM without committing it; this is where a
+   * page becomes backed. Fails before the cursor moves, so the allocator
+   * is unchanged on RESULT_OUT_OF_MEMORY. */
+  const Error committed = layout_guest_ram_commit(pa, page_count << VMM_PAGE_BITS);
+  if (!error_is_ok(committed)) return committed;
+  *out_pa = pa;
   allocator->used_bytes += page_count << VMM_PAGE_BITS;
   return OK;
 }

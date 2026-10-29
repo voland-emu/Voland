@@ -562,6 +562,10 @@ int main(void)
   test_lifecycle();
 
   CHECK_OK(layout_create());
+  /* These tests map fixed PAs rather than going through page_allocator,
+   * so they commit the backing themselves (§4: native guest RAM is only
+   * reserved until committed; Windows faults on an uncommitted page). */
+  CHECK_OK(layout_guest_ram_commit(0, PA_B + 16 * VMM_PAGE_SIZE));
   VMM_Context *vmm = vmm_create();
   CHECK(vmm != NULL);
 

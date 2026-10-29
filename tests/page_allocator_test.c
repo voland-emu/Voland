@@ -8,6 +8,27 @@
 #include "common/vmm.h"
 #include "hle/kernel/page_allocator.h"
 
+#include <string.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+/* Proves pages handed out by page_allocator_allocate are committed (§4:
+ * native guest RAM is only reserved until then): VirtualQuery on Windows,
+ * where an uncommitted page would fault; a write and readback everywhere. */
+static void check_committed(uint64_t pa, uint64_t page_count) {
+  uint8_t *host = (uint8_t *)(uintptr_t)(layout_get()->guest_ram_base + pa);
+  const size_t bytes = (size_t)(page_count * VMM_PAGE_SIZE);
+#if defined(_WIN32)
+  MEMORY_BASIC_INFORMATION info;
+  CHECK(VirtualQuery(host, &info, sizeof(info)) == sizeof(info));
+  CHECK(info.State == MEM_COMMIT && info.RegionSize >= bytes);
+#endif
+  memset(host, 0xC3, bytes);
+  CHECK(host[0] == 0xC3 && host[bytes - 1] == 0xC3);
+}
+
 int main(void) {
   Page_Allocator pages;
 
@@ -35,8 +56,10 @@ int main(void) {
   uint64_t pa = 0;
   CHECK_OK(page_allocator_allocate(&pages, 1, &pa));
   CHECK(pa == 0x100000);
+  check_committed(pa, 1);
   CHECK_OK(page_allocator_allocate(&pages, 2, &pa));
   CHECK(pa == 0x100000 + VMM_PAGE_SIZE);
+  check_committed(pa, 2);
   CHECK(page_allocator_free_bytes(&pages) == VMM_PAGE_SIZE);
 
   /* Exhaustion leaves the allocator unchanged. */
@@ -120,6 +143,13 @@ int main(void) {
       page_allocator_free(&spread, spread_pa + (uint64_t)(2 * PAGE_ALLOCATOR_MAX_FREE_RUNS) * VMM_PAGE_SIZE, 1),
       RESULT_OUT_OF_MEMORY);
   CHECK(spread.free_run_count == PAGE_ALLOCATOR_MAX_FREE_RUNS);
+
+  /* The whole-guest-RAM allocator commits only what it hands out, and the
+   * last page of guest RAM (top of the HLE carve-out) is reachable. */
+  CHECK_OK(page_allocator_init(&pages, ram - VMM_PAGE_SIZE, VMM_PAGE_SIZE));
+  CHECK_OK(page_allocator_allocate(&pages, 1, &pa));
+  CHECK(pa == ram - VMM_PAGE_SIZE);
+  check_committed(pa, 1);
 
   layout_destroy();
   return 0;

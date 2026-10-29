@@ -47,12 +47,13 @@ message(STATUS "  Build type:    ${CMAKE_BUILD_TYPE}")
 # WASM / Emscripten build flags (see docs/DESIGN.md section 24).
 #
 # The core module owns no memory of its own: the boot sequence (§16)
-# creates ONE shared, memory64 WebAssembly.Memory and imports it in, sized
+# creates ONE shared wasm32 WebAssembly.Memory and imports it in, sized
 # to fit guest RAM + every layout.h region + Emscripten's own data/stack/
-# heap. INITIAL_MEMORY here and TOTAL_MEMORY_PAGES in platform/web/src/
-# main.ts must both equal 5_637_144_576 bytes (~5.25GiB) - growth is
-# disabled, so a mismatch is an instantiation-time failure, not silent
-# truncation.
+# heap. INITIAL_MEMORY here, TOTAL_MEMORY_PAGES in platform/web/src/
+# memory.ts and LAYOUT_LINEAR_MEMORY_PAGES in core/common/layout.h must
+# all equal 65535 pages (4_294_901_760 bytes, 4 GiB minus one page, §4) -
+# growth is disabled, so a mismatch is an instantiation-time failure, not
+# silent truncation. platform/web/tests/unit/memory.test.ts checks them.
 #
 if(EMSCRIPTEN)
   # Minimum toolchain (mirrors global.json). The flag spellings below are
@@ -66,17 +67,14 @@ if(EMSCRIPTEN)
       "Run: emsdk install latest && emsdk activate latest")
   endif()
 
-  # wasm64/pthreads change codegen (wasm64 target, shared-memory atomics),
-  # not just link behavior - they are REQUIRED on both the compile and link
-  # lines, or object files come out wasm32 and linking fails outright
-  # ("wasm32 object file can't be linked in wasm64 mode").
+  # pthreads change codegen (shared-memory atomics), not just link
+  # behavior - the flags are REQUIRED on both the compile and link lines.
   #
   # Spellings are the ones emcc 6.0.9 accepts without -Wdeprecated:
-  # -m64 (not -sMEMORY64=1) and -pthread (not -sUSE_PTHREADS=1). Both are
-  # the standard Clang flags; the -s forms were emcc-only aliases.
+  # -pthread (not -sUSE_PTHREADS=1). No -m64: the core is wasm32 since
+  # v3.29 (§4); memory64 returns only with Switch 2 (§24 absent-flags table).
   set(VOLAND_WASM_CODEGEN_FLAGS
     -msimd128                 # REQUIRED: NEON -> WASM SIMD; ~4x slowdown without
-    -m64                       # wasm64: REQUIRED for Switch 1, not just Switch 2 (§4)
     -pthread                   # implies SHARED_MEMORY (shared-memory atomics)
     -sSHARED_MEMORY=1          # redundant under -pthread; kept for explicitness
   )
@@ -85,11 +83,11 @@ if(EMSCRIPTEN)
     ${VOLAND_WASM_CODEGEN_FLAGS}
     -sWASM=1
     -sIMPORTED_MEMORY=1        # host creates the single WebAssembly.Memory (§16)
-    -sINITIAL_MEMORY=5637144576   # ~5.25GB; must equal the host's initial; with
-                                  # growth disabled this IS the maximum, so no
-                                  # separate MAXIMUM_MEMORY - views never detach
+    -sINITIAL_MEMORY=4294901760   # 65535 pages: 4 GiB minus one page (§4); must
+                                  # equal the host's initial; with growth disabled
+                                  # this IS the maximum, so no separate
+                                  # MAXIMUM_MEMORY - views never go stale
     -sALLOW_MEMORY_GROWTH=0       # fixed at boot (§4); never enable
-    -sPTHREAD_POOL_SIZE=8
     -sMODULARIZE=1             # emits a factory function, not a self-executing script
     -sEXPORT_ES6=1             # ...as an ES module, so cpu.worker.ts can `import()` it
     -sEXPORT_NAME=createVolandCoreModule

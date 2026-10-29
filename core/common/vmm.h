@@ -30,7 +30,9 @@
  *   "Linear-memory offset" is a plain pointer value: on Emscripten a C
  *   pointer IS an offset into the single WebAssembly.Memory (§4); on
  *   native, layout.c stores every region base the same way
- *   ((uint64_t)(uintptr_t)ptr), so one PTE format serves both. A PTE with
+ *   ((uint64_t)(uintptr_t)ptr), so one PTE format serves both. Under
+ *   wasm32 (§4) the offset fits in bits 31..12 and the high bits are zero.
+ *   A PTE with
  *   a nonzero host offset and zero permission bits is a mapped-but-
  *   inaccessible page (guard/reserved), distinguishable from unmapped.
  *
@@ -92,7 +94,7 @@
 #define VMM_L2_SPAN_BYTES (VMM_L2_ENTRY_COUNT * VMM_PAGE_SIZE)    /* 64MB */
 
 /* Maximum number of L2 tables a context can have live at once. 256 tables
- * cover 16GB of mapped guest VA (4GB of physical RAM mapped once, plus
+ * cover 16GB of mapped guest VA (3333 MiB of guest RAM (§4) mapped once, plus
  * mirrors, plus sparse code/stack/TLS windows) for a 32MB arena. Exceeding
  * it makes vmm_map fail with RESULT_OUT_OF_MEMORY (no partial mutation);
  * revisit when a real title's mapping profile is measured. */

@@ -39,7 +39,7 @@ int main(void)
   /* Layout (§4): every region reserved, guest RAM sized for Switch 1. */
   const Memory_Layout *layout = layout_get();
   CHECK(layout != NULL);
-  CHECK(layout->guest_ram_size == ((uint64_t)4 * 1024 * 1024 * 1024));
+  CHECK(layout->guest_ram_size == LAYOUT_GUEST_RAM_SIZE);
   CHECK(layout->guest_ram_base != 0);
   CHECK(layout->page_table_l1_base != 0);
   CHECK(layout->trace_buffer_base != 0);
@@ -49,6 +49,8 @@ int main(void)
    * checked path is wired end to end. */
   CHECK(emu.vmm != NULL);
   CHECK((uint64_t)(uintptr_t)vmm_page_table_l1(emu.vmm) == layout->page_table_l1_base);
+  /* A fixed PA, not page_allocator's: commit it first (§4). */
+  CHECK(layout_guest_ram_commit(0x1000ULL, VMM_PAGE_SIZE).code == RESULT_OK);
   err = vmm_map(emu.vmm, 0x8000000ULL, 0x1000ULL, VMM_PAGE_SIZE, VMM_PERM_RW);
   CHECK(err.code == RESULT_OK);
   CHECK(vmm_write32(emu.vmm, 0x8000010ULL, 0xC0FFEE42u).code == RESULT_OK);

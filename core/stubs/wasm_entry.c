@@ -36,7 +36,7 @@ EXPORT uint64_t cpu_get_reg_ffi(uint32_t index);
 EXPORT void cpu_set_reg_ffi(uint32_t index, uint64_t value);
 EXPORT uint64_t cpu_get_pc_ffi(void);
 EXPORT int cpu_backend_id_ffi(void);
-EXPORT uint64_t layout_get_ffi(void);
+EXPORT uintptr_t layout_get_ffi(void);
 
 static Emulator g_emulator;
 static int g_initialised = 0;
@@ -102,8 +102,8 @@ EXPORT uint64_t cpu_get_pc_ffi(void)
 
 /* Numeric backend id rather than marshalling `name`/`version` C strings
  * across the FFI boundary - platform/web/bindings/core.ts keeps the
- * matching display-name table. Sidesteps wasm64 string-pointer
- * marshalling entirely for a value that is fixed at compile time anyway
+ * matching display-name table. Sidesteps string-pointer marshalling
+ * entirely for a value that is fixed at compile time anyway
  * (CPU_BACKEND is a CMake configure-time choice, never a runtime one). */
 EXPORT int cpu_backend_id_ffi(void)
 {
@@ -115,13 +115,14 @@ EXPORT int cpu_backend_id_ffi(void)
 }
 
 /* Returns a linear-memory pointer to the live Memory_Layout struct (§4) as
- * a plain integer, cast from the module's own address space. platform/web
- * bindings/layout.ts mirrors the C struct field-for-field and reads it
- * back out of the shared WebAssembly.Memory at this offset. */
-EXPORT uint64_t layout_get_ffi(void)
+ * a plain integer, cast from the module's own address space: uintptr_t,
+ * so under wasm32 it is an i32 and reaches JS as a Number (§24).
+ * platform/web bindings/layout.ts mirrors the C struct field-for-field
+ * and reads it back out of the shared WebAssembly.Memory at this offset. */
+EXPORT uintptr_t layout_get_ffi(void)
 {
   const Memory_Layout *layout = layout_get();
-  return (uint64_t)(uintptr_t)layout;
+  return (uintptr_t)layout;
 }
 
 #ifndef __EMSCRIPTEN__

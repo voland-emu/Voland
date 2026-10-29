@@ -8,6 +8,7 @@
 #include "check.h"
 
 #include "common/arena.h"
+#include "common/layout.h"
 #include "emulator.h"
 #include "hle/kernel/process.h"
 #include "loader_fixtures.h"
@@ -218,6 +219,8 @@ int main(void) {
      * the first megabyte of the allocator; dirty all of it. */
     const uint64_t dirty_bytes = 0x100000;
     const uint64_t dirty_gva = 0x4000000000ull;
+    /* Fixed PAs, not page_allocator's: commit them first (§4). */
+    CHECK_OK(layout_guest_ram_commit(0, dirty_bytes));
     CHECK_OK(vmm_map(emu.vmm, dirty_gva, 0, dirty_bytes, VMM_PERM_RW));
     for (uint64_t at = 0; at < dirty_bytes; at += sizeof(junk)) {
       CHECK_OK(vmm_write_block(emu.vmm, dirty_gva + at, junk, sizeof(junk)));
