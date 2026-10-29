@@ -52,7 +52,7 @@ jobs:
         run: ctest --preset native-noop
 
   web-core:
-    name: web (Emscripten ${{ env.EMSDK_VERSION }})
+    name: web (Emscripten)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
