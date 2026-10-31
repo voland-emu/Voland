@@ -16,6 +16,7 @@
 
 import type { CpuBackendId, SwitchCoreExports } from "@bindings/core";
 import { CPU_BACKEND_DISPLAY_NAMES } from "@bindings/core";
+import { readControllerStateFfi } from "@bindings/input";
 import { readMemoryLayout } from "@bindings/layout";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 
@@ -40,8 +41,10 @@ async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExp
 }
 
 let core: SwitchCoreExports | null = null;
+let coreMemory: WebAssembly.Memory | null = null;
 
 async function init(memory: WebAssembly.Memory): Promise<void> {
+  coreMemory = memory;
   log("info", "cpu.worker initialising");
 
   try {
@@ -105,6 +108,19 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "halt") {
     const halted: CPUToMainMessage = { type: "halted" };
     self.postMessage(halted);
+    return;
+  }
+
+  if (msg.type === "debugReadInputController") {
+    if (!core || !coreMemory) {
+      log("warn", "debugReadInputController: core not ready");
+      return;
+    }
+    // Unsigned: see the layout-pointer comment in init() above.
+    const ptr = core._input_region_read_controller_ffi(msg.slot) >>> 0;
+    const state = readControllerStateFfi(coreMemory, ptr);
+    const response: CPUToMainMessage = { type: "debugInputController", slot: msg.slot, state };
+    self.postMessage(response);
     return;
   }
 });

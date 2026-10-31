@@ -35,6 +35,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes
                       -Wmissing-prototypes -Wno-unused-parameter)
+elseif(MSVC)
+  # core/common/seqlock.h's C11 <stdatomic.h> (§25 Phase 1 input region)
+  # errors out on this toolset ("C atomic support is not enabled")
+  # without this flag - verified against MSVC 19.51/toolset 14.51.
+  # GCC/Clang support <stdatomic.h> unconditionally, so this is MSVC-only.
+  add_compile_options(/experimental:c11atomics)
 endif()
 
 message(STATUS "Voland configuration")
@@ -95,7 +101,8 @@ if(EMSCRIPTEN)
     "-sEXPORTED_FUNCTIONS=['_emulator_create_ffi','_emulator_destroy_ffi',
                             '_emulator_run_ffi','_emulator_step_ffi',
                             '_layout_get_ffi','_cpu_backend_id_ffi',
-                            '_cpu_get_reg_ffi','_cpu_set_reg_ffi','_cpu_get_pc_ffi']"
+                            '_cpu_get_reg_ffi','_cpu_set_reg_ffi','_cpu_get_pc_ffi',
+                            '_input_region_read_controller_ffi']"
     "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
   )
 endif()

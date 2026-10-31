@@ -42,13 +42,14 @@ static void collect_bases_and_sizes(const Memory_Layout *layout,
   bases[4] = layout->gpu_ring_base;          sizes[4] = LAYOUT_GPU_RING_SIZE;
   bases[5] = layout->gpu_completion_ring_base; sizes[5] = LAYOUT_GPU_COMPLETION_RING_SIZE;
   bases[6] = layout->input_region_base;      sizes[6] = LAYOUT_INPUT_REGION_SIZE;
-  bases[7] = layout->trace_buffer_base;      sizes[7] = LAYOUT_TRACE_BUFFER_SIZE;
-  bases[8] = layout->breakpoint_region_base; sizes[8] = LAYOUT_BREAKPOINT_REGION_SIZE;
+  bases[7] = layout->output_region_base;     sizes[7] = LAYOUT_OUTPUT_REGION_SIZE;
+  bases[8] = layout->trace_buffer_base;      sizes[8] = LAYOUT_TRACE_BUFFER_SIZE;
+  bases[9] = layout->breakpoint_region_base; sizes[9] = LAYOUT_BREAKPOINT_REGION_SIZE;
 }
 
 static void check_no_overlap(const Memory_Layout *layout)
 {
-  enum { REGION_COUNT = 9 };
+  enum { REGION_COUNT = 10 };
   uint64_t bases[REGION_COUNT];
   uint64_t sizes[REGION_COUNT];
   collect_bases_and_sizes(layout, bases, sizes, REGION_COUNT);
@@ -153,6 +154,14 @@ int main(void)
   CHECK((LAYOUT_GUEST_RAM_HLE_CARVEOUT_BASE_PA & VMM_PAGE_OFFSET_MASK) == 0);
   /* 65535 pages, never 65536 (nothing ends at 2^32, §4). */
   CHECK(LAYOUT_LINEAR_MEMORY_BYTES == (uint64_t)4294901760);
+
+  /* Input region (§18, v3.29): 8 x 64-byte controller slots + one 128-byte
+   * touch block = 640 bytes. Output region: 8 x 32-byte slots = 256 bytes,
+   * reserved only (no writer/reader until Phase 4). */
+  CHECK(LAYOUT_INPUT_REGION_SLOT_BYTES == 64);
+  CHECK(LAYOUT_INPUT_TOUCH_BLOCK_BYTES == 128);
+  CHECK(LAYOUT_INPUT_REGION_SIZE == 640);
+  CHECK(LAYOUT_OUTPUT_REGION_SIZE == 256);
 
 
   /* Fresh creation reserves every region with the documented sizes. */

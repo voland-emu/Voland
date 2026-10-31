@@ -22,6 +22,11 @@ export interface SwitchCoreExports {
   readonly _layout_get_ffi:      () => number; /* Memory_Layout* in linear memory */
   readonly _cpu_backend_id_ffi:  () => number; /* CpuBackendId */
 
+  /* Input_Controller_State* in linear memory, freshly read through the
+   * seqlock for `slot` (§18). e2e-only - see bindings/input.ts and
+   * core/stubs/wasm_entry.c's comment on the wrapper. */
+  readonly _input_region_read_controller_ffi: (slot: number) => number;
+
   readonly _cpu_get_reg_ffi: (index: number) => bigint;
   readonly _cpu_set_reg_ffi: (index: number, value: bigint) => void;
   readonly _cpu_get_pc_ffi:  () => bigint;
