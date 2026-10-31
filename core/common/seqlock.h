@@ -35,6 +35,27 @@
  * describes. Caught by input_region_test under the native-noop preset's
  * Debug/MSVC build (§25 Phase 1 input region task) - release builds and
  * non-debug-heap allocators could easily have hidden it.
+ *
+ * Payload accesses must go through SEQLOCK_RELAXED_STORE/_LOAD below, not
+ * memcpy or a plain dereference. The sequence counter's release/acquire
+ * ordering gives a *successful* (non-retried) read a real happens-before
+ * edge to the write it observed - but the C11 and WASM memory models
+ * still classify the read a writer's in-flight, about-to-be-discarded
+ * update races against as a data race on that payload byte, full stop,
+ * independent of whether the retry check later notices and throws the
+ * result away. ThreadSanitizer enforces exactly this and will flag a
+ * plain (non-atomic) payload access even though the algorithm is
+ * correct - this is the long-standing, still-unresolved "seqlock
+ * problem" raised repeatedly in WG14/WG21: every real-world seqlock,
+ * including the Linux kernel's, has this same formal gap and relies on
+ * no shipped compiler tearing or eliminating a naturally-aligned
+ * machine-word-or-smaller access. Closing it costs nothing: a relaxed
+ * atomic load/store of a naturally-aligned word is the same single
+ * instruction a plain load/store would be on every target this project
+ * compiles for (x86, ARM, every WASM engine), so there is no reason to
+ * accept the "industry standard, but technically UB" status quo instead.
+ * Caught by `tests/seqlock_test.c`'s real-thread stress test under
+ * ThreadSanitizer (Clang, WSL) before it ever reached input_region.c.
  */
 #ifndef SWITCH_COMMON_SEQLOCK_H
 #define SWITCH_COMMON_SEQLOCK_H
@@ -77,5 +98,20 @@ static inline bool seqlock_read_retry(const volatile atomic_uint *seq, uint32_t 
 {
   return (begin & 1u) != 0u || atomic_load_explicit(seq, memory_order_acquire) != begin;
 }
+
+/* Relaxed-atomic payload accessors (see the header comment above for
+ * why plain memcpy/dereference is not enough). `T` must be a type whose
+ * atomic form is lock-free on every target this project compiles for -
+ * `uint32_t`, `int16_t` and `float` all qualify (verified against MSVC's
+ * /experimental:c11atomics and GCC/Clang's native support) - and `addr`
+ * must already be aligned to `T`'s natural alignment, same as any other
+ * atomic access. These only need memory_order_relaxed: the sequence
+ * counter above is what establishes ordering with the rest of the
+ * payload; the payload fields have no ordering relationship with each
+ * other. */
+#define SEQLOCK_RELAXED_STORE(T, addr, value) \
+  atomic_store_explicit((volatile _Atomic(T) *)(void *)(addr), (T)(value), memory_order_relaxed)
+#define SEQLOCK_RELAXED_LOAD(T, addr) \
+  atomic_load_explicit((const volatile _Atomic(T) *)(const void *)(addr), memory_order_relaxed)
 
 #endif /* SWITCH_COMMON_SEQLOCK_H */

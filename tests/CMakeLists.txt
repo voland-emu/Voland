@@ -24,6 +24,14 @@ add_test(NAME vmm_test COMMAND vmm_test)
 #
 add_executable(seqlock_test seqlock_test.c)
 target_link_libraries(seqlock_test PRIVATE switch_core)
+if(NOT WIN32)
+  # seqlock_test races a real writer thread (pthreads here; Win32 threads
+  # need no extra link library) against the main thread reading - the
+  # actual concurrency property the primitive exists for, not just its
+  # single-threaded state machine.
+  find_package(Threads REQUIRED)
+  target_link_libraries(seqlock_test PRIVATE Threads::Threads)
+endif()
 add_test(NAME seqlock_test COMMAND seqlock_test)
 
 add_executable(input_region_test input_region_test.c)

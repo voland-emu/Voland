@@ -7,6 +7,8 @@
 #include "common/input_region.h"
 #include "common/layout.h"
 
+#include <float.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,6 +131,72 @@ static void test_touch_does_not_alias_controllers(void)
   check_controller_equal(&slot7, &got);
 }
 
+/* Extreme values at every field's type boundary, not just the mid-range
+ * fixture values the other tests use - a word-level relaxed-atomic
+ * pack/unpack (input_region.c) truncating or sign-extending wrong would
+ * hide behind small values. */
+static void test_controller_boundary_values(void)
+{
+  Input_Controller_State state;
+  memset(&state, 0, sizeof(state));
+  state.buttons = UINT32_MAX;
+  state.axes[0] = INT16_MIN;
+  state.axes[1] = INT16_MAX;
+  for (int i = 2; i < 8; i++) state.axes[i] = (int16_t)((i % 2) ? INT16_MIN : INT16_MAX);
+  state.flags = UINT32_MAX;
+  state.motion_sample = UINT32_MAX;
+  state.accel[0] = -FLT_MAX;
+  state.accel[1] = FLT_MAX;
+  state.accel[2] = -0.0f;
+  state.gyro[0] = FLT_MIN;
+  state.gyro[1] = -FLT_MIN;
+  state.gyro[2] = 0.0f;
+
+  input_region_write_controller(0, &state);
+  Input_Controller_State got;
+  memset(&got, 0xAA, sizeof(got));
+  input_region_read_controller(0, &got);
+
+  CHECK(got.buttons == UINT32_MAX);
+  CHECK(got.axes[0] == INT16_MIN);
+  CHECK(got.axes[1] == INT16_MAX);
+  for (int i = 2; i < 8; i++) CHECK(got.axes[i] == state.axes[i]);
+  CHECK(got.flags == UINT32_MAX);
+  CHECK(got.motion_sample == UINT32_MAX);
+  CHECK(got.accel[0] == -FLT_MAX);
+  CHECK(got.accel[1] == FLT_MAX);
+  CHECK(memcmp(&got.accel[2], &state.accel[2], sizeof(float)) == 0); /* -0.0f, bit-exact */
+  CHECK(got.gyro[0] == FLT_MIN);
+  CHECK(got.gyro[1] == -FLT_MIN);
+  CHECK(got.gyro[2] == 0.0f);
+}
+
+static void test_touch_boundary_values(void)
+{
+  Input_Touch_State state;
+  memset(&state, 0, sizeof(state));
+  state.point_count = LAYOUT_INPUT_TOUCH_MAX_POINTS; /* exactly at the limit, not past it */
+  for (uint32_t i = 0; i < LAYOUT_INPUT_TOUCH_MAX_POINTS; i++)
+  {
+    state.points[i].finger_id = UINT32_MAX - i;
+    state.points[i].x = (i % 2) ? -FLT_MAX : FLT_MAX;
+    state.points[i].y = (float)i;
+  }
+
+  input_region_write_touch(&state);
+  Input_Touch_State got;
+  memset(&got, 0xAA, sizeof(got));
+  input_region_read_touch(&got);
+
+  CHECK(got.point_count == LAYOUT_INPUT_TOUCH_MAX_POINTS);
+  for (uint32_t i = 0; i < LAYOUT_INPUT_TOUCH_MAX_POINTS; i++)
+  {
+    CHECK(got.points[i].finger_id == UINT32_MAX - i);
+    CHECK(got.points[i].x == state.points[i].x);
+    CHECK(got.points[i].y == (float)i);
+  }
+}
+
 int main(void)
 {
   CHECK(layout_create().code == RESULT_OK);
@@ -136,6 +204,8 @@ int main(void)
   test_controller_round_trip_and_isolation();
   test_touch_round_trip();
   test_touch_does_not_alias_controllers();
+  test_controller_boundary_values();
+  test_touch_boundary_values();
 
   layout_destroy();
 

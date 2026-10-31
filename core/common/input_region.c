@@ -2,8 +2,6 @@
 #include "common/assert.h"
 #include "common/seqlock.h"
 
-#include <string.h>
-
 /* Field offsets within a controller slot (§18 - see input_region.h). */
 #define CONTROLLER_OFF_SEQ           0
 #define CONTROLLER_OFF_BUTTONS       4
@@ -39,25 +37,34 @@ static uint8_t *touch_block(void)
 /* Byte-exact pack/unpack rather than overlaying a C struct: field offsets
  * are the §18 wire format, which must not move with a compiler's padding
  * choices (CLAUDE.md's portability rule - cf. Trace_Event's "no packing
- * attribute" comment, §23). */
+ * attribute" comment, §23). Every field goes through
+ * SEQLOCK_RELAXED_STORE/_LOAD, not memcpy - see seqlock.h's header
+ * comment for why a plain copy is a formal data race even though this
+ * region is seqlock-protected. */
 static void controller_pack(uint8_t *slot, const Input_Controller_State *state)
 {
-  memcpy(slot + CONTROLLER_OFF_BUTTONS, &state->buttons, sizeof(state->buttons));
-  memcpy(slot + CONTROLLER_OFF_AXES, state->axes, sizeof(state->axes));
-  memcpy(slot + CONTROLLER_OFF_FLAGS, &state->flags, sizeof(state->flags));
-  memcpy(slot + CONTROLLER_OFF_MOTION_SAMPLE, &state->motion_sample, sizeof(state->motion_sample));
-  memcpy(slot + CONTROLLER_OFF_ACCEL, state->accel, sizeof(state->accel));
-  memcpy(slot + CONTROLLER_OFF_GYRO, state->gyro, sizeof(state->gyro));
+  SEQLOCK_RELAXED_STORE(uint32_t, slot + CONTROLLER_OFF_BUTTONS, state->buttons);
+  for (int i = 0; i < 8; i++)
+    SEQLOCK_RELAXED_STORE(int16_t, slot + CONTROLLER_OFF_AXES + i * 2, state->axes[i]);
+  SEQLOCK_RELAXED_STORE(uint32_t, slot + CONTROLLER_OFF_FLAGS, state->flags);
+  SEQLOCK_RELAXED_STORE(uint32_t, slot + CONTROLLER_OFF_MOTION_SAMPLE, state->motion_sample);
+  for (int i = 0; i < 3; i++)
+    SEQLOCK_RELAXED_STORE(float, slot + CONTROLLER_OFF_ACCEL + i * 4, state->accel[i]);
+  for (int i = 0; i < 3; i++)
+    SEQLOCK_RELAXED_STORE(float, slot + CONTROLLER_OFF_GYRO + i * 4, state->gyro[i]);
 }
 
 static void controller_unpack(const uint8_t *slot, Input_Controller_State *state)
 {
-  memcpy(&state->buttons, slot + CONTROLLER_OFF_BUTTONS, sizeof(state->buttons));
-  memcpy(state->axes, slot + CONTROLLER_OFF_AXES, sizeof(state->axes));
-  memcpy(&state->flags, slot + CONTROLLER_OFF_FLAGS, sizeof(state->flags));
-  memcpy(&state->motion_sample, slot + CONTROLLER_OFF_MOTION_SAMPLE, sizeof(state->motion_sample));
-  memcpy(state->accel, slot + CONTROLLER_OFF_ACCEL, sizeof(state->accel));
-  memcpy(state->gyro, slot + CONTROLLER_OFF_GYRO, sizeof(state->gyro));
+  state->buttons = SEQLOCK_RELAXED_LOAD(uint32_t, slot + CONTROLLER_OFF_BUTTONS);
+  for (int i = 0; i < 8; i++)
+    state->axes[i] = SEQLOCK_RELAXED_LOAD(int16_t, slot + CONTROLLER_OFF_AXES + i * 2);
+  state->flags = SEQLOCK_RELAXED_LOAD(uint32_t, slot + CONTROLLER_OFF_FLAGS);
+  state->motion_sample = SEQLOCK_RELAXED_LOAD(uint32_t, slot + CONTROLLER_OFF_MOTION_SAMPLE);
+  for (int i = 0; i < 3; i++)
+    state->accel[i] = SEQLOCK_RELAXED_LOAD(float, slot + CONTROLLER_OFF_ACCEL + i * 4);
+  for (int i = 0; i < 3; i++)
+    state->gyro[i] = SEQLOCK_RELAXED_LOAD(float, slot + CONTROLLER_OFF_GYRO + i * 4);
 }
 
 void input_region_write_controller(uint32_t slot_index, const Input_Controller_State *state)
@@ -83,25 +90,25 @@ void input_region_read_controller(uint32_t slot_index, Input_Controller_State *o
 
 static void touch_pack(uint8_t *block, const Input_Touch_State *state)
 {
-  memcpy(block + TOUCH_OFF_POINT_COUNT, &state->point_count, sizeof(state->point_count));
+  SEQLOCK_RELAXED_STORE(uint32_t, block + TOUCH_OFF_POINT_COUNT, state->point_count);
   for (uint32_t i = 0; i < LAYOUT_INPUT_TOUCH_MAX_POINTS; i++)
   {
     uint8_t *p = block + TOUCH_OFF_POINTS + i * LAYOUT_INPUT_TOUCH_POINT_BYTES;
-    memcpy(p + TOUCH_POINT_OFF_FINGER_ID, &state->points[i].finger_id, sizeof(uint32_t));
-    memcpy(p + TOUCH_POINT_OFF_X, &state->points[i].x, sizeof(float));
-    memcpy(p + TOUCH_POINT_OFF_Y, &state->points[i].y, sizeof(float));
+    SEQLOCK_RELAXED_STORE(uint32_t, p + TOUCH_POINT_OFF_FINGER_ID, state->points[i].finger_id);
+    SEQLOCK_RELAXED_STORE(float, p + TOUCH_POINT_OFF_X, state->points[i].x);
+    SEQLOCK_RELAXED_STORE(float, p + TOUCH_POINT_OFF_Y, state->points[i].y);
   }
 }
 
 static void touch_unpack(const uint8_t *block, Input_Touch_State *state)
 {
-  memcpy(&state->point_count, block + TOUCH_OFF_POINT_COUNT, sizeof(state->point_count));
+  state->point_count = SEQLOCK_RELAXED_LOAD(uint32_t, block + TOUCH_OFF_POINT_COUNT);
   for (uint32_t i = 0; i < LAYOUT_INPUT_TOUCH_MAX_POINTS; i++)
   {
     const uint8_t *p = block + TOUCH_OFF_POINTS + i * LAYOUT_INPUT_TOUCH_POINT_BYTES;
-    memcpy(&state->points[i].finger_id, p + TOUCH_POINT_OFF_FINGER_ID, sizeof(uint32_t));
-    memcpy(&state->points[i].x, p + TOUCH_POINT_OFF_X, sizeof(float));
-    memcpy(&state->points[i].y, p + TOUCH_POINT_OFF_Y, sizeof(float));
+    state->points[i].finger_id = SEQLOCK_RELAXED_LOAD(uint32_t, p + TOUCH_POINT_OFF_FINGER_ID);
+    state->points[i].x = SEQLOCK_RELAXED_LOAD(float, p + TOUCH_POINT_OFF_X);
+    state->points[i].y = SEQLOCK_RELAXED_LOAD(float, p + TOUCH_POINT_OFF_Y);
   }
 }
 

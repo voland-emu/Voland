@@ -15,6 +15,14 @@
  * never exposes motion data for in the first place.
  */
 
+/* Relative, not the "@bindings/*" alias: this file is imported directly
+ * by tests/unit/input-writer.test.ts under plain Node
+ * (--experimental-strip-types only erases types, it does not resolve
+ * bundler path aliases - vite.config.ts's "@bindings" mapping only
+ * applies inside the Vite build). Every other value-importing module
+ * here uses relative paths for the same reason; main.ts/cpu.worker.ts
+ * get away with the alias only because nothing yet imports them from a
+ * unit test. */
 import {
   INPUT_REGION_MAX_CONTROLLERS,
   InputFlags,
@@ -23,13 +31,16 @@ import {
   writeTouchBlock,
   type ControllerState,
   type TouchPoint,
-} from "@bindings/input";
-import type { MemoryLayout } from "@bindings/layout";
+} from "../bindings/input.ts";
+import type { MemoryLayout } from "../bindings/layout.ts";
 
 /** Switch A/B and X/Y are swapped relative to the Standard Gamepad (Xbox)
  * layout (§18). buttonMap[i] names which Standard Gamepad button index
- * feeds Switch button bit i. */
-const STANDARD_BUTTON_MAP: readonly number[] = [
+ * feeds Switch button bit i. Exported for tests/unit/input-writer.test.ts,
+ * which checks every entry against the Standard Gamepad spec's physical
+ * button positions one at a time - an off-by-one here is exactly the kind
+ * of mistake that is easy to make and easy to miss by eye. */
+export const STANDARD_BUTTON_MAP: readonly number[] = [
   1, 0,            // A, B
   3, 2,            // X, Y
   4, 5, 6, 7,      // L, R, ZL, ZR
@@ -45,11 +56,17 @@ const MAX_TOUCH_POINTS = 10;
 const TOUCH_SCREEN_WIDTH = 1280;
 const TOUCH_SCREEN_HEIGHT = 720;
 
-function axisToI16(value: number): number {
+/** Exported for tests - the Gamepad API's axes are -1..1 floats, the wire
+ * format is i16, and both ends of that range (and values outside it, which
+ * real hardware does report briefly) need to land somewhere defined. */
+export function axisToI16(value: number): number {
   return Math.round(Math.max(-1, Math.min(1, value)) * 32767);
 }
 
-function readControllerState(pad: Gamepad): ControllerState {
+/** Exported for tests - takes a plain object shaped like the subset of
+ * Gamepad this reads (buttons[].pressed, axes[], connected), not a real
+ * browser Gamepad, so a test can construct one without a DOM. */
+export function readControllerState(pad: Gamepad): ControllerState {
   let buttons = 0;
   for (let i = 0; i < STANDARD_BUTTON_MAP.length; i++) {
     if (pad.buttons[STANDARD_BUTTON_MAP[i]]?.pressed) buttons |= 1 << i;
@@ -81,8 +98,12 @@ function pollGamepads(memory: WebAssembly.Memory, inputRegionBase: number): void
 
 /** Tracks active touches by pointerId (the same identity canvas pointer
  * events already assign, reused directly as the wire format's finger id)
- * and converts client coordinates to the §18 1280x720 screen space. */
-function createTouchTracker(canvas: HTMLCanvasElement): () => readonly TouchPoint[] {
+ * and converts client coordinates to the §18 1280x720 screen space.
+ * Exported for tests - `canvas` only needs getBoundingClientRect and
+ * addEventListener, so a test can pass a plain fake rather than a real
+ * HTMLCanvasElement (no jsdom dependency, per CLAUDE.md's "no third-party
+ * dependencies not listed in DESIGN.md"). */
+export function createTouchTracker(canvas: HTMLCanvasElement): () => readonly TouchPoint[] {
   const active = new Map<number, TouchPoint>();
 
   function toScreenSpace(event: PointerEvent): { x: number; y: number } {
