@@ -17,6 +17,20 @@ target_link_libraries(vmm_test PRIVATE switch_core)
 add_test(NAME vmm_test COMMAND vmm_test)
 
 #
+# core/common/seqlock + input_region (§25 Phase 1 "Input region + seqlock
+# writer/reader"): seqlock_test is a pure state-machine unit test;
+# input_region_test drives the real write/read functions over a live
+# layout_create()'d region.
+#
+add_executable(seqlock_test seqlock_test.c)
+target_link_libraries(seqlock_test PRIVATE switch_core)
+add_test(NAME seqlock_test COMMAND seqlock_test)
+
+add_executable(input_region_test input_region_test.c)
+target_link_libraries(input_region_test PRIVATE switch_core)
+add_test(NAME input_region_test COMMAND input_region_test)
+
+#
 # core/hle/loader (§1.6, §12): one unit test per parser over synthesized
 # images from loader_fixtures.c, plus loader_smoke for the composed
 # bootstrap path (NCA -> ExeFS -> npdm, NCA -> ExeFS -> NSO -> segment,

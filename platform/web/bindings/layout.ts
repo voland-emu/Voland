@@ -1,7 +1,7 @@
 /**
  * Mirrors core/common/layout.h field-for-field. The core exports a single
  * pointer (`layout_get_ffi()`) into the shared WebAssembly.Memory; every
- * JS-side consumer reads the same ten uint64 fields back out of linear
+ * JS-side consumer reads the same eleven uint64 fields back out of linear
  * memory rather than allocating its own shared buffers (§4).
  *
  * wasm32 (v3.29, §4): pointers are 32-bit and cross the JS boundary as
@@ -20,12 +20,13 @@ export interface MemoryLayout {
   readonly gpuRingBase: number;
   readonly gpuCompletionRingBase: number;
   readonly inputRegionBase: number;
+  readonly outputRegionBase: number;
   readonly traceBufferBase: number;
   readonly breakpointRegionBase: number;
 }
 
 /* Field order and width must match Memory_Layout in core/common/layout.h. */
-const FIELD_COUNT = 10;
+const FIELD_COUNT = 11;
 const FIELD_BYTES = 8;
 export const MEMORY_LAYOUT_STRUCT_SIZE = FIELD_COUNT * FIELD_BYTES;
 
@@ -57,8 +58,9 @@ export function readMemoryLayout(memory: WebAssembly.Memory, layoutPtr: number):
     gpuRingBase:           field(5),
     gpuCompletionRingBase: field(6),
     inputRegionBase:       field(7),
-    traceBufferBase:       field(8),
-    breakpointRegionBase:  field(9),
+    outputRegionBase:      field(8),
+    traceBufferBase:       field(9),
+    breakpointRegionBase:  field(10),
   };
 }
 

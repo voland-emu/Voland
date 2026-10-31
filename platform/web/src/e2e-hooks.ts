@@ -8,11 +8,26 @@
  * window.__VOLAND_MEMORY__ / __VOLAND_TRACE_METADATA__).
  */
 
+import { writeControllerSlot, type ControllerState } from "@bindings/input";
+import type { MemoryLayout } from "@bindings/layout";
+
 export interface VolandE2EBootMilestone {
   readonly crossOriginIsolated: boolean;
   readonly allocatedMemoryBytes: number;
   /** Set once the CPU worker's layout handshake arrives (§16). */
   readonly guestRamBytes?: number;
+  /** Set alongside guestRamBytes - the e2e/input.spec.ts cross-language
+   * round-trip test (§18 Phase 1) drives the real writer
+   * (bindings/input.ts) against this memory, through this layout, then
+   * asks this worker to read it back through the real C reader. */
+  readonly inputRegionHandle?: {
+    readonly cpuWorker: Worker;
+    /** Writes `slot` through the real production writer
+     * (bindings/input.ts's writeControllerSlot), against the real
+     * shared memory and layout - the test calls this rather than
+     * duplicating the byte-packing itself. */
+    readonly writeController: (slot: number, state: ControllerState) => void;
+  };
 }
 
 declare global {
@@ -32,4 +47,16 @@ export function publishLayoutMilestone(guestRamBytes: number): void {
   const boot = window.__VOLAND_E2E__;
   if (!boot) return;
   window.__VOLAND_E2E__ = { ...boot, guestRamBytes };
+}
+
+export function publishInputRegionHandle(memory: WebAssembly.Memory, layout: MemoryLayout, cpuWorker: Worker): void {
+  const boot = window.__VOLAND_E2E__;
+  if (!boot) return;
+  window.__VOLAND_E2E__ = {
+    ...boot,
+    inputRegionHandle: {
+      cpuWorker,
+      writeController: (slot, state) => writeControllerSlot(memory, layout.inputRegionBase, slot, state),
+    },
+  };
 }

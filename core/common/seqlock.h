@@ -1,0 +1,81 @@
+/**
+ * Generic seqlock primitive for host-side shared regions in linear memory
+ * (§4/§6/§18): torn-read-free synchronization for a single writer and any
+ * number of readers, no blocking, no allocation. input_region.{h,c} uses
+ * it today; any future single-writer shared region (output region,
+ * control region) can reuse it instead of reinventing the retry loop.
+ *
+ * Protocol (§18): the counter starts even. A writer bumps it odd
+ * (release), writes the payload, bumps it even (release) again. A reader
+ * loads the counter (acquire); odd means a writer is mid-update, retry.
+ * Otherwise it reads the payload, then loads the counter again
+ * (acquire): changed means the payload may be torn, retry. Exactly one
+ * writer per region, by convention - this is not a mutual-exclusion
+ * primitive and gives undefined results under concurrent writers.
+ *
+ * MSVC: C11 <stdatomic.h> requires /experimental:c11atomics on this
+ * project's toolset (verified against MSVC 19.51/toolset 14.51: an
+ * unguarded #include fails hard with "C atomic support is not enabled"
+ * otherwise). CMakeLists.txt adds that flag under MSVC in the same PR
+ * that lands this header - the Phase 0 SWITCH_PRINTF_FORMAT pattern, one
+ * level up (a compiler flag instead of a macro guard, since there is no
+ * portable spelling to fall back to: GCC/Clang already support
+ * <stdatomic.h> unconditionally).
+ *
+ * Starting parity is NOT assumed to be even. `common/arena`'s backing
+ * memory is a plain malloc() on native (layout.h: only Emscripten's
+ * WebAssembly.Memory arrives pre-zeroed), and MSVC's debug heap fills
+ * fresh allocations with the byte 0xCD - odd, as a u32. A seqlock whose
+ * first write just does current+1 would land on an EVEN value from that
+ * odd garbage and stay stuck "mid-write" forever, livelocking every
+ * reader. seqlock_write_begin forces the published value odd regardless
+ * of what was there before, so the very first write self-corrects the
+ * parity in one step; every write after that sees a properly-even
+ * `current` and behaves exactly as the even/odd alternation above
+ * describes. Caught by input_region_test under the native-noop preset's
+ * Debug/MSVC build (§25 Phase 1 input region task) - release builds and
+ * non-debug-heap allocators could easily have hidden it.
+ */
+#ifndef SWITCH_COMMON_SEQLOCK_H
+#define SWITCH_COMMON_SEQLOCK_H
+
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+/* Begins a write: returns the odd sequence value just published. Follow
+ * with the payload write, then seqlock_write_end(seq, that value).
+ * `| 1u` (not just `+ 1u`) guarantees the published value is odd even if
+ * `seq` started odd itself - uninitialized backing memory on a first
+ * write, see the header comment - rather than only flipping parity
+ * relative to whatever was already there. */
+static inline uint32_t seqlock_write_begin(volatile atomic_uint *seq)
+{
+  uint32_t odd = (atomic_load_explicit(seq, memory_order_relaxed) + 1u) | 1u;
+  atomic_store_explicit(seq, odd, memory_order_release);
+  return odd;
+}
+
+/* Ends a write begun with seqlock_write_begin: publishes the even value,
+ * making the just-written payload visible to readers. */
+static inline void seqlock_write_end(volatile atomic_uint *seq, uint32_t odd)
+{
+  atomic_store_explicit(seq, odd + 1u, memory_order_release);
+}
+
+/* Starts a read attempt; pass the result to seqlock_read_retry after
+ * reading the payload. */
+static inline uint32_t seqlock_read_begin(const volatile atomic_uint *seq)
+{
+  return atomic_load_explicit(seq, memory_order_acquire);
+}
+
+/* True if the payload just read between seqlock_read_begin and this call
+ * may be torn and must be retried: `begin` was odd, or the counter has
+ * since changed. */
+static inline bool seqlock_read_retry(const volatile atomic_uint *seq, uint32_t begin)
+{
+  return (begin & 1u) != 0u || atomic_load_explicit(seq, memory_order_acquire) != begin;
+}
+
+#endif /* SWITCH_COMMON_SEQLOCK_H */
