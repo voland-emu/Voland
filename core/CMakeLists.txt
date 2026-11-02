@@ -5,6 +5,7 @@ set(SWITCH_CORE_SOURCES
   common/arena.c
   common/layout.c
   common/vmm.c
+  common/input_region.c
   cpu/cpu.c
   cpu/backends/noop/noop.c
   hle/hle.c
@@ -51,6 +52,8 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   common/result.h
   common/layout.h
   common/vmm.h
+  common/seqlock.h
+  common/input_region.h
   cpu/cpu.h
   cpu/backends/noop/noop.h
   hle/hle.h

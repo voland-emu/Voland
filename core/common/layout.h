@@ -5,10 +5,11 @@
  * WebAssembly.Memory of LAYOUT_LINEAR_MEMORY_PAGES pages; on native, a set of regions carved by this file at
  * emulator_create() time that together stand in for that single mapping.
  * Every subsystem's shared state (guest RAM, page tables, framebuffer
- * slots, audio ring, GPU rings, input region, trace buffer, breakpoint
- * region) is a named region reserved here in one pass, and every consumer
- * (JIT, HLE, JS workers) addresses its region only through the offsets
- * exported by layout_get() - nobody allocates their own shared buffer.
+ * slots, audio ring, GPU rings, input region, output region, trace
+ * buffer, breakpoint region) is a named region reserved here in one pass,
+ * and every consumer (JIT, HLE, JS workers) addresses its region only
+ * through the offsets exported by layout_get() - nobody allocates their
+ * own shared buffer.
  *
  * Every region except guest RAM is carved from one `common/arena` (no
  * per-region heap calls, per CLAUDE.md's "no malloc, use common/arena"
@@ -91,12 +92,28 @@
 #define LAYOUT_GPU_RING_SIZE ((uint64_t)4 * 1024 * 1024)
 #define LAYOUT_GPU_COMPLETION_RING_SIZE ((uint64_t)64 * 1024)
 
-/* Input region: 8 controller slots, seqlock + buttons + axes + flags,
- * rounded up to 32 bytes/slot (§18). */
+/* Input region (§18, v3.29): 8 controller slots - seqlock + buttons + axes
+ * + flags + motion/IMU sample, 64 bytes/slot - followed by one touch block
+ * (seqlock + point count + up to 10 points, 12 bytes/point). One writer
+ * (main thread, each rAF), any number of readers (hid:, Phase 4); see
+ * common/seqlock.h and common/input_region.h. */
 #define LAYOUT_INPUT_REGION_MAX_CONTROLLERS ((uint64_t)8)
-#define LAYOUT_INPUT_REGION_SLOT_BYTES ((uint64_t)32)
+#define LAYOUT_INPUT_REGION_SLOT_BYTES ((uint64_t)64)
+#define LAYOUT_INPUT_TOUCH_MAX_POINTS ((uint64_t)10)
+#define LAYOUT_INPUT_TOUCH_POINT_BYTES ((uint64_t)12)  /* finger id u32 + x f32 + y f32 */
+#define LAYOUT_INPUT_TOUCH_HEADER_BYTES ((uint64_t)8)  /* sequence + point count */
+#define LAYOUT_INPUT_TOUCH_BLOCK_BYTES \
+  (LAYOUT_INPUT_TOUCH_HEADER_BYTES + LAYOUT_INPUT_TOUCH_MAX_POINTS * LAYOUT_INPUT_TOUCH_POINT_BYTES)
 #define LAYOUT_INPUT_REGION_SIZE \
-  (LAYOUT_INPUT_REGION_MAX_CONTROLLERS * LAYOUT_INPUT_REGION_SLOT_BYTES)
+  (LAYOUT_INPUT_REGION_MAX_CONTROLLERS * LAYOUT_INPUT_REGION_SLOT_BYTES + LAYOUT_INPUT_TOUCH_BLOCK_BYTES)
+
+/* Output region (§18, v3.29): rumble + player LEDs, CPU Worker (hid:) ->
+ * main thread, 8 slots x 32 bytes. Reserved by the Phase 1 input-region
+ * task; its writer (hid:) and main-thread reader land in Phase 4. */
+#define LAYOUT_OUTPUT_REGION_MAX_CONTROLLERS ((uint64_t)8)
+#define LAYOUT_OUTPUT_REGION_SLOT_BYTES ((uint64_t)32)
+#define LAYOUT_OUTPUT_REGION_SIZE \
+  (LAYOUT_OUTPUT_REGION_MAX_CONTROLLERS * LAYOUT_OUTPUT_REGION_SLOT_BYTES)
 
 /* Trace buffer: write index + pad + capacity x 24-byte Trace_Event (§23). */
 #define LAYOUT_TRACE_BUFFER_CAPACITY ((uint64_t)65536)
@@ -111,11 +128,11 @@
 
 /* Every region except guest RAM, summed for the one arena_create() call
  * that backs all of them (layout.c). +64 covers alignment padding across
- * the individual arena_allocate() calls (8 regions x <=7 bytes each). */
+ * the individual arena_allocate() calls (9 regions x <=7 bytes each). */
 #define LAYOUT_SMALL_REGIONS_SIZE \
   (LAYOUT_PAGE_TABLE_L1_SIZE + LAYOUT_FRAMEBUFFER_REGION_SIZE + LAYOUT_AUDIO_RING_SIZE + \
    LAYOUT_GPU_RING_SIZE + LAYOUT_GPU_COMPLETION_RING_SIZE + LAYOUT_INPUT_REGION_SIZE + \
-   LAYOUT_TRACE_BUFFER_SIZE + LAYOUT_BREAKPOINT_REGION_SIZE + (uint64_t)64)
+   LAYOUT_OUTPUT_REGION_SIZE + LAYOUT_TRACE_BUFFER_SIZE + LAYOUT_BREAKPOINT_REGION_SIZE + (uint64_t)64)
 
 typedef struct Memory_Layout {
   uint64_t guest_ram_base;         /* linear-memory offset of guest physical RAM */
@@ -126,6 +143,7 @@ typedef struct Memory_Layout {
   uint64_t gpu_ring_base;          /* §13 */
   uint64_t gpu_completion_ring_base; /* §13: GPU->CPU syncpoint completions */
   uint64_t input_region_base;      /* §18 */
+  uint64_t output_region_base;     /* §18: rumble + player LEDs, reserved for Phase 4 */
   uint64_t trace_buffer_base;      /* §23 */
   uint64_t breakpoint_region_base; /* §23 */
 } Memory_Layout;

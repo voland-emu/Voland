@@ -14,7 +14,8 @@
 import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
 import type { MemoryLayout } from "@bindings/layout";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
-import { publishBootMilestone, publishLayoutMilestone } from "./e2e-hooks";
+import { publishBootMilestone, publishInputRegionHandle, publishLayoutMilestone } from "./e2e-hooks";
+import { startInputWriter } from "./input";
 import { appendLogLine, setStatus } from "./log";
 import { createSharedMemory, TOTAL_MEMORY_PAGES } from "./memory";
 
@@ -221,6 +222,16 @@ async function boot(): Promise<BootResult | null> {
   // closures (the "layout" case above), so it treats `layout` as still
   // `null` here; the cast reasserts the declared type.
   const finalLayout = layout as MemoryLayout | null;
+
+  // §18: the main thread is the input region's one writer, each rAF.
+  // Started once the layout handshake has given us inputRegionBase - not
+  // gated on cpuSlot/gpuSlot being "ready", since hid: (the reader) is a
+  // Phase 4 service that doesn't exist yet to race against.
+  if (finalLayout) {
+    startInputWriter(memory, finalLayout);
+    publishInputRegionHandle(memory, finalLayout, cpuWorker);
+  }
+
   return {
     adapterLabel: adapterLabel ?? "unavailable",
     cpuBackend:   cpuBackend   ?? "unavailable",

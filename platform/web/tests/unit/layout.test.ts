@@ -15,8 +15,8 @@ function memoryWithLayoutFields(values: readonly bigint[]): WebAssembly.Memory {
   return memory;
 }
 
-test("readMemoryLayout parses all 10 fields in declared order", () => {
-  const values = Array.from({ length: 10 }, (_, i) => BigInt(i + 1));
+test("readMemoryLayout parses all 11 fields in declared order", () => {
+  const values = Array.from({ length: 11 }, (_, i) => BigInt(i + 1));
   const memory = memoryWithLayoutFields(values);
 
   const layout = readMemoryLayout(memory, 0);
@@ -29,12 +29,13 @@ test("readMemoryLayout parses all 10 fields in declared order", () => {
   assert.equal(layout.gpuRingBase, 6);
   assert.equal(layout.gpuCompletionRingBase, 7);
   assert.equal(layout.inputRegionBase, 8);
-  assert.equal(layout.traceBufferBase, 9);
-  assert.equal(layout.breakpointRegionBase, 10);
+  assert.equal(layout.outputRegionBase, 9);
+  assert.equal(layout.traceBufferBase, 10);
+  assert.equal(layout.breakpointRegionBase, 11);
 });
 
 test("readMemoryLayout honors a non-zero base pointer", () => {
-  const values = Array.from({ length: 10 }, (_, i) => BigInt(100 + i));
+  const values = Array.from({ length: 11 }, (_, i) => BigInt(100 + i));
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
   const offset = 256;
   const view = new DataView(memory.buffer, offset, MEMORY_LAYOUT_STRUCT_SIZE);
@@ -43,17 +44,17 @@ test("readMemoryLayout honors a non-zero base pointer", () => {
   const layout = readMemoryLayout(memory, offset);
 
   assert.equal(layout.guestRamBase, 100);
-  assert.equal(layout.breakpointRegionBase, 109);
+  assert.equal(layout.breakpointRegionBase, 110);
 });
 
 test("readMemoryLayout yields Numbers, not bigints (wasm32, §4)", () => {
-  const values = Array.from({ length: 10 }, (_, i) => BigInt(0x1000 * (i + 1)));
+  const values = Array.from({ length: 11 }, (_, i) => BigInt(0x1000 * (i + 1)));
   const layout = readMemoryLayout(memoryWithLayoutFields(values), 0);
   Object.values(layout).forEach(value => assert.equal(typeof value, "number"));
 });
 
 test("readMemoryLayout rejects a field that is not a wasm32 address", () => {
-  const values = Array.from({ length: 10 }, () => 0n);
+  const values = Array.from({ length: 11 }, () => 0n);
   values[3] = 2n ** 32n;
   assert.throws(() => readMemoryLayout(memoryWithLayoutFields(values), 0), RangeError);
 });
