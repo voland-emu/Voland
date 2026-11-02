@@ -12,6 +12,17 @@
  * memory is a SharedArrayBuffer shared with the CPU Worker, and only
  * Atomics operations give the release ordering the protocol depends on
  * across workers.
+ *
+ * Every payload field goes through Atomics too (relaxed, same as
+ * common/seqlock.h's SEQLOCK_RELAXED_STORE on the C side), not a plain
+ * DataView write: the ECMAScript shared-memory model gives no ordering
+ * guarantee for a non-atomic write relative to another agent's atomic
+ * operations, so a plain write here would reopen, on the JS side, the
+ * exact data race seqlock.h's header comment describes and seqlock.h
+ * closes on the C side. Atomics has no float32/float64 overload, so a
+ * float field's relaxed store goes through its raw bit pattern
+ * (float32Bits) on an Int32 view instead - the bytes written are
+ * identical to a direct float32 store.
  */
 
 export const INPUT_REGION_MAX_CONTROLLERS = 8;
@@ -83,6 +94,19 @@ function touchBlockOffset(inputRegionBase: number): number {
   return inputRegionBase + INPUT_REGION_MAX_CONTROLLERS * INPUT_REGION_SLOT_BYTES;
 }
 
+/* Scratch, non-shared single-element buffer used only to reinterpret a
+ * float32 value as its raw bit pattern (Atomics has no float32/float64
+ * overload) before an Atomics.store on an Int32 view of the real shared
+ * memory. Single-threaded by construction - every call completes before
+ * the next one reads f32Scratch - so no atomics are needed here. */
+const f32Scratch = new Float32Array(1);
+const f32ScratchBits = new Int32Array(f32Scratch.buffer);
+
+function float32Bits(value: number): number {
+  f32Scratch[0] = value;
+  return f32ScratchBits[0];
+}
+
 /** Writes controller `slot`'s state through the seqlock protocol. */
 export function writeControllerSlot(
   memory: WebAssembly.Memory,
@@ -92,18 +116,21 @@ export function writeControllerSlot(
 ): void {
   const offset = controllerSlotOffset(inputRegionBase, slot);
   const seq = new Int32Array(memory.buffer, offset + CONTROLLER_OFF_SEQ, 1);
-  const view = new DataView(memory.buffer, offset, INPUT_REGION_SLOT_BYTES);
-  const little = true;
+  // Whole-slot Int32 view (relaxed payload stores; the sequence word above
+  // handles ordering) plus an Int16 view over just the axes, which are
+  // narrower than Atomics' 32-bit granularity.
+  const i32 = new Int32Array(memory.buffer, offset, INPUT_REGION_SLOT_BYTES / 4);
+  const i16 = new Int16Array(memory.buffer, offset + CONTROLLER_OFF_AXES, 8);
 
   const odd = (Atomics.load(seq, 0) + 1) | 0;
   Atomics.store(seq, 0, odd);
 
-  view.setUint32(CONTROLLER_OFF_BUTTONS, state.buttons, little);
-  for (let i = 0; i < 8; i++) view.setInt16(CONTROLLER_OFF_AXES + i * 2, state.axes[i] ?? 0, little);
-  view.setUint32(CONTROLLER_OFF_FLAGS, state.flags, little);
-  view.setUint32(CONTROLLER_OFF_MOTION_SAMPLE, state.motionSample, little);
-  for (let i = 0; i < 3; i++) view.setFloat32(CONTROLLER_OFF_ACCEL + i * 4, state.accel[i] ?? 0, little);
-  for (let i = 0; i < 3; i++) view.setFloat32(CONTROLLER_OFF_GYRO + i * 4, state.gyro[i] ?? 0, little);
+  Atomics.store(i32, CONTROLLER_OFF_BUTTONS / 4, state.buttons | 0);
+  for (let i = 0; i < 8; i++) Atomics.store(i16, i, state.axes[i] ?? 0);
+  Atomics.store(i32, CONTROLLER_OFF_FLAGS / 4, state.flags | 0);
+  Atomics.store(i32, CONTROLLER_OFF_MOTION_SAMPLE / 4, state.motionSample | 0);
+  for (let i = 0; i < 3; i++) Atomics.store(i32, CONTROLLER_OFF_ACCEL / 4 + i, float32Bits(state.accel[i] ?? 0));
+  for (let i = 0; i < 3; i++) Atomics.store(i32, CONTROLLER_OFF_GYRO / 4 + i, float32Bits(state.gyro[i] ?? 0));
 
   Atomics.store(seq, 0, (odd + 1) | 0);
 }
@@ -115,19 +142,18 @@ export function writeTouchBlock(memory: WebAssembly.Memory, inputRegionBase: num
   }
   const offset = touchBlockOffset(inputRegionBase);
   const seq = new Int32Array(memory.buffer, offset + TOUCH_OFF_SEQ, 1);
-  const view = new DataView(memory.buffer, offset, INPUT_TOUCH_BLOCK_BYTES);
-  const little = true;
+  const i32 = new Int32Array(memory.buffer, offset, INPUT_TOUCH_BLOCK_BYTES / 4);
 
   const odd = (Atomics.load(seq, 0) + 1) | 0;
   Atomics.store(seq, 0, odd);
 
-  view.setUint32(TOUCH_OFF_POINT_COUNT, touch.length, little);
+  Atomics.store(i32, TOUCH_OFF_POINT_COUNT / 4, touch.length);
   for (let i = 0; i < INPUT_TOUCH_MAX_POINTS; i++) {
     const p = touch[i];
     const pointOffset = TOUCH_OFF_POINTS + i * INPUT_TOUCH_POINT_BYTES;
-    view.setUint32(pointOffset + TOUCH_POINT_OFF_FINGER_ID, p?.fingerId ?? 0, little);
-    view.setFloat32(pointOffset + TOUCH_POINT_OFF_X, p?.x ?? 0, little);
-    view.setFloat32(pointOffset + TOUCH_POINT_OFF_Y, p?.y ?? 0, little);
+    Atomics.store(i32, (pointOffset + TOUCH_POINT_OFF_FINGER_ID) / 4, p?.fingerId ?? 0);
+    Atomics.store(i32, (pointOffset + TOUCH_POINT_OFF_X) / 4, float32Bits(p?.x ?? 0));
+    Atomics.store(i32, (pointOffset + TOUCH_POINT_OFF_Y) / 4, float32Bits(p?.y ?? 0));
   }
 
   Atomics.store(seq, 0, (odd + 1) | 0);

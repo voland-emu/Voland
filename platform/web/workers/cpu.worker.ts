@@ -16,7 +16,7 @@
 
 import type { CpuBackendId, SwitchCoreExports } from "@bindings/core";
 import { CPU_BACKEND_DISPLAY_NAMES } from "@bindings/core";
-import { readControllerStateFfi } from "@bindings/input";
+import { INPUT_REGION_MAX_CONTROLLERS, readControllerStateFfi } from "@bindings/input";
 import { readMemoryLayout } from "@bindings/layout";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 
@@ -114,6 +114,15 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "debugReadInputController") {
     if (!core || !coreMemory) {
       log("warn", "debugReadInputController: core not ready");
+      return;
+    }
+    // input_region.c's bounds check (SWITCH_ASSERT) is debug-only and
+    // compiles to a no-op under NDEBUG, so this unprivileged debug-only
+    // message must validate `slot` itself before it ever reaches the FFI
+    // call - an out-of-range slot there is unchecked pointer arithmetic
+    // into linear memory, not a safe failure.
+    if (!Number.isInteger(msg.slot) || msg.slot < 0 || msg.slot >= INPUT_REGION_MAX_CONTROLLERS) {
+      log("warn", `debugReadInputController: slot ${msg.slot} out of range`);
       return;
     }
     // Unsigned: see the layout-pointer comment in init() above.
